@@ -1,0 +1,20 @@
+# PyTorch 2.5.1 with CUDA 12.4
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
+# Use the official PyTorch wheel index for CUDA 12.4
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# lightning
+lightning
+tensorboard
+
+pathlib2
+jupyter
+
+# ESM (Evolutionary Scale Modeling)
+esm
+
+# PyTorch Geometric and dependencies (for PyTorch 2.5.1 + CUDA 12.4)
+# Use the official PyG wheel index for compatibility
+torch-geometric
