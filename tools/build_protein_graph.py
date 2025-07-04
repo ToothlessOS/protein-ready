@@ -174,7 +174,6 @@ def convert_to_pytorch(graph):
 
         # Handle edge kind - it could be a set or list
         edge_kind = edge_data.get('kind', set())
-        print(edge_kind)
         if isinstance(edge_kind, set):
             edge_kind = list(edge_kind)
         
@@ -205,7 +204,8 @@ def convert_to_pytorch(graph):
     print(f"Final shapes - Features: {node_features.shape}, Coords: {node_coords_tensor.shape}")
     print(f"Final shapes - Edge Index: {edge_index.shape}, Edge Attr: {edge_attr.shape}")
 
-    print(edge_attr)
+    print(node_features)
+    print(edge_index)
 
     return {
         'node_features': node_features,
