@@ -150,19 +150,19 @@ def convert_to_pytorch(graph):
     
     # Separate physio-chemical properties from distance-based metrics
     physio_chemical_mapping = {
-        'peptide_bond': 1,
-        'hbond': 2,
-        'disulfide': 3,
-        'ionic': 4,
-        'aromatic': 5,
-        'aromatic_sulfur': 6,
-        'cation_pi': 7,
+        'peptide_bond': [1, 0, 0, 0, 0, 0, 0],
+        'hbond': [0, 1, 0, 0, 0, 0, 0],
+        'disulfide': [0, 0, 1, 0, 0, 0, 0],
+        'ionic': [0, 0, 0, 1, 0, 0, 0],
+        'aromatic': [0, 0, 0, 0, 1, 0, 0],
+        'aromatic_sulfur': [0, 0, 0, 0, 0, 1, 0],
+        'cation_pi': [0, 0, 0, 0, 0, 0, 1],
     }
     
     distance_metric_mapping = {
-        'distance_threshold': 1,
-        'sequence_distance': 2,
-        'k_nn': 3,
+        'sequence_edge': [1, 0, 0],
+        'knn': [0, 1, 0], 
+        'distance_threshold': [0, 0, 1],
     }
 
     for u, v, edge_data in graph.edges(data=True):
@@ -174,31 +174,38 @@ def convert_to_pytorch(graph):
 
         # Handle edge kind - it could be a set or list
         edge_kind = edge_data.get('kind', set())
+        print(edge_kind)
         if isinstance(edge_kind, set):
             edge_kind = list(edge_kind)
         
-        # Initialize edge feature vector [physio_chemical, distance_metric, distance]
-        physio_chemical_type = 0  # Default: no physio-chemical interaction
-        distance_metric_type = 0  # Default: no distance-based metric
+        # Initialize edge feature vector [physio_chemical_1-7, distance_metric_1-3, distance]
+        physio_chemical_vector = [0, 0, 0, 0, 0, 0, 0]  # Default: no physio-chemical interaction
+        distance_metric_vector = [0, 0, 0]  # Default: no distance-based metric
         
-        # Categorize edge types
+        # Categorize edge types - accumulate multiple metrics
         for kind in edge_kind:
             if kind in physio_chemical_mapping:
-                physio_chemical_type = physio_chemical_mapping[kind]
+                # Add the physio-chemical values instead of replacing
+                for i, val in enumerate(physio_chemical_mapping[kind]):
+                    physio_chemical_vector[i] += val
             elif kind in distance_metric_mapping:
-                distance_metric_type = distance_metric_mapping[kind]
+                # Add the distance metric values instead of replacing
+                for i, val in enumerate(distance_metric_mapping[kind]):
+                    distance_metric_vector[i] += val
         
         dist = edge_data.get('distance', 0.0)
         
-        # Create 3D edge feature: [physio_chemical_type, distance_metric_type, distance]
-        edge_attrs.append([physio_chemical_type, distance_metric_type, dist])
-        edge_attrs.append([physio_chemical_type, distance_metric_type, dist])
+        # Create 11D edge feature: [physio_chemical_1-7, distance_metric_1-3, distance]
+        edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
+        edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
     
     edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(edge_attrs, dtype=torch.float32)
 
     print(f"Final shapes - Features: {node_features.shape}, Coords: {node_coords_tensor.shape}")
     print(f"Final shapes - Edge Index: {edge_index.shape}, Edge Attr: {edge_attr.shape}")
+
+    print(edge_attr)
 
     return {
         'node_features': node_features,
