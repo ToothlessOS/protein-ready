@@ -43,7 +43,7 @@ def load_callbacks():
 
     callbacks.append(plc.ModelCheckpoint(
         monitor='val_acc',
-        filename='best-{epoch:02d}-{val_acc:.3f}',
+        filename='best-{epoch:03d}-{val_acc:.3f}',
         save_top_k=1,
         mode='max',
         save_last=True

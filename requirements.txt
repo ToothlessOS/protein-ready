@@ -15,6 +15,9 @@ jupyter
 # ESM (Evolutionary Scale Modeling)
 esm
 
+# Generates graph representations of protein
+graphein
+
 # PyTorch Geometric and dependencies (for PyTorch 2.5.1 + CUDA 12.4)
 # Use the official PyG wheel index for compatibility
 torch-geometric
