@@ -21,3 +21,5 @@ graphein
 # PyTorch Geometric and dependencies (for PyTorch 2.5.1 + CUDA 12.4)
 # Use the official PyG wheel index for compatibility
 torch-geometric
+torch-scatter
+torchdrug
