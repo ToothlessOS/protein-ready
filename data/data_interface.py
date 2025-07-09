@@ -17,13 +17,12 @@ import importlib
 import pickle as pkl
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
-from torch.utils.data.sampler import WeightedRandomSampler
-
+from .graph_collate import graph_collate_fn
 
 class DInterface(pl.LightningDataModule):
 
     def __init__(self, num_workers=8,
-                 dataset='',
+                 dataset='protein_dataset',  # This should match your dataset file name
                  **kwargs):
         super().__init__()
         self.num_workers = num_workers
@@ -53,13 +52,13 @@ class DInterface(pl.LightningDataModule):
     #     return DataLoader(self.trainset, batch_size=self.batch_size, num_workers=self.num_workers, sampler = sampler)
 
     def train_dataloader(self):
-        return DataLoader(self.trainset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
+        return DataLoader(self.trainset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True, collate_fn=graph_collate_fn)
 
     def val_dataloader(self):
-        return DataLoader(self.valset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+        return DataLoader(self.valset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, collate_fn=graph_collate_fn)
 
     def test_dataloader(self):
-        return DataLoader(self.testset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+        return DataLoader(self.testset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, collate_fn=graph_collate_fn)
 
     def load_data_module(self):
         name = self.dataset

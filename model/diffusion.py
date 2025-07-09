@@ -1,1 +1,0 @@
-# Use diffusion learning scheme in GearNet for pretraining the model

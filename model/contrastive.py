@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_scatter import scatter_add, scatter_mean, scatter_max
+from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
 from .egnn import EGNN
 
 
 class ContrastiveEGNN(nn.Module):
     """
-    Contrastive learning model with two EGNN blocks for protein graph pretraining.
-    Each EGNN is followed by feature extraction layers for dimension reduction.
+    Contrastive learning model with one EGNN block for protein graph pretraining.
+    The EGNN is followed by two different feature extraction layers for contrastive learning.
     """
     
     def __init__(self, 
@@ -35,8 +35,8 @@ class ContrastiveEGNN(nn.Module):
         self.device = device
         self.pooling = pooling
         
-        # First EGNN block
-        self.egnn1_1 = EGNN(
+        # Single EGNN block
+        self.egnn1 = EGNN(
             in_node_nf=in_node_nf,
             hidden_nf=hidden_nf,
             out_node_nf=hidden_nf,
@@ -48,32 +48,7 @@ class ContrastiveEGNN(nn.Module):
             normalize=True
         )
 
-        self.egnn1_2 = EGNN(
-            in_node_nf=hidden_nf,
-            hidden_nf=hidden_nf//4,
-            out_node_nf=hidden_nf//4,
-            in_edge_nf=in_edge_nf,
-            device=device,
-            n_layers=egnn_layers,
-            residual=True,
-            attention=True,
-            normalize=True
-        )
-        
-        # Second EGNN block
-        self.egnn2_1 = EGNN(
-            in_node_nf=in_node_nf,
-            hidden_nf=hidden_nf,
-            out_node_nf=hidden_nf,
-            in_edge_nf=in_edge_nf,
-            device=device,
-            n_layers=egnn_layers,
-            residual=True,
-            attention=True,
-            normalize=True
-        )
-
-        self.egnn2_2 = EGNN(
+        self.egnn2 = EGNN(
             in_node_nf=hidden_nf,
             hidden_nf=hidden_nf//4,
             out_node_nf=hidden_nf//4,
@@ -123,15 +98,13 @@ class ContrastiveEGNN(nn.Module):
             elif self.pooling == 'sum':
                 return torch.sum(node_features, dim=0, keepdim=True)
         else:
-            # Batch processing case
-            batch_size = int(batch.max().item() + 1)
-            
+            # Batch processing case using PyTorch Geometric pooling functions
             if self.pooling == 'mean':
-                return scatter_mean(node_features, batch, dim=0, dim_size=batch_size)
+                return global_mean_pool(node_features, batch)
             elif self.pooling == 'max':
-                return scatter_max(node_features, batch, dim=0, dim_size=batch_size)[0]
+                return global_max_pool(node_features, batch)
             elif self.pooling == 'sum':
-                return scatter_add(node_features, batch, dim=0, dim_size=batch_size)
+                return global_add_pool(node_features, batch)
             else:
                 raise ValueError(f"Unsupported pooling method: {self.pooling}")
     
@@ -149,43 +122,27 @@ class ContrastiveEGNN(nn.Module):
         Returns:
             Tuple of (logits1, logits2) for contrastive learning
         """
-        # First EGNN branch - two sequential blocks
-        h1, pos1 = self.egnn1_1(
+        # Single EGNN processing - two sequential blocks
+        h, pos = self.egnn1(
             h=node_features,
             x=node_pos,
             edges=edge_index,
             edge_attr=edge_attr
         )
         
-        h1, pos1 = self.egnn1_2(
-            h=h1,
-            x=pos1,
-            edges=edge_index,
-            edge_attr=edge_attr
-        )
-        
-        # Second EGNN branch - two sequential blocks (same input, different parameters)
-        h2, pos2 = self.egnn2_1(
-            h=node_features,
-            x=node_pos,
-            edges=edge_index,
-            edge_attr=edge_attr
-        )
-        
-        h2, pos2 = self.egnn2_2(
-            h=h2,
-            x=pos2,
+        h, pos = self.egnn2(
+            h=h,
+            x=pos,
             edges=edge_index,
             edge_attr=edge_attr
         )
         
         # Graph-level pooling
-        graph_features1 = self.graph_pooling(h1, batch)
-        graph_features2 = self.graph_pooling(h2, batch)
+        graph_features = self.graph_pooling(h, batch)
         
-        # Feature extraction and dimension reduction
-        logits1 = self.feature_extractor1(graph_features1)
-        logits2 = self.feature_extractor2(graph_features2)
+        # Feature extraction and dimension reduction using two different extractors
+        logits1 = self.feature_extractor1(graph_features)
+        logits2 = self.feature_extractor2(graph_features)
         
         return logits1, logits2
     
@@ -194,77 +151,85 @@ class ContrastiveEGNN(nn.Module):
         Get embeddings without feature extraction (for downstream tasks).
         
         Returns:
-            Tuple of (embeddings1, embeddings2) from both EGNN branches
+            Tuple of (embeddings1, embeddings2) from both feature extractors
         """
         with torch.no_grad():
-            # First EGNN branch - two sequential blocks
-            h1, pos1 = self.egnn1_1(
+            # Single EGNN processing - two sequential blocks
+            h, pos = self.egnn1(
                 h=node_features,
                 x=node_pos,
                 edges=edge_index,
                 edge_attr=edge_attr
             )
             
-            h1, _ = self.egnn1_2(
-                h=h1,
-                x=pos1,
-                edges=edge_index,
-                edge_attr=edge_attr
-            )
-            
-            # Second EGNN branch - two sequential blocks
-            h2, pos2 = self.egnn2_1(
-                h=node_features,
-                x=node_pos,
-                edges=edge_index,
-                edge_attr=edge_attr
-            )
-            
-            h2, _ = self.egnn2_2(
-                h=h2,
-                x=pos2,
+            h, _ = self.egnn2(
+                h=h,
+                x=pos,
                 edges=edge_index,
                 edge_attr=edge_attr
             )
             
             # Graph-level pooling
-            embeddings1 = self.graph_pooling(h1, batch)
-            embeddings2 = self.graph_pooling(h2, batch)
+            embeddings = self.graph_pooling(h, batch)
             
-        return embeddings1, embeddings2
+        return embeddings, embeddings
 
 
 class ContrastiveLoss(nn.Module):
     """
-    Contrastive loss for self-supervised learning.
+    NT-Xent (Normalized Temperature-scaled Cross Entropy) loss as proposed in SimCLR.
     """
     
-    def __init__(self, temperature=0.1):
+    def __init__(self, temperature=0.07):
         super(ContrastiveLoss, self).__init__()
         self.temperature = temperature
     
     def forward(self, z1, z2):
         """
-        Compute contrastive loss between two views.
+        Compute NT-Xent loss between two views.
         
         Args:
             z1, z2: Embeddings from two views [batch_size, embedding_dim]
         
         Returns:
-            Contrastive loss
+            NT-Xent contrastive loss
         """
+        batch_size = z1.size(0)
+        
         # Normalize embeddings
         z1 = F.normalize(z1, dim=1)
         z2 = F.normalize(z2, dim=1)
         
-        # Compute similarity matrix
-        similarity_matrix = torch.matmul(z1, z2.T) / self.temperature
+        # Concatenate both views: [2*batch_size, embedding_dim]
+        z = torch.cat([z1, z2], dim=0)
         
-        # Labels: positive pairs are on the diagonal
-        batch_size = z1.size(0)
-        labels = torch.arange(batch_size).to(z1.device)
+        # Compute similarity matrix: [2*batch_size, 2*batch_size]
+        sim_matrix = torch.matmul(z, z.T) / self.temperature
         
-        # Contrastive loss (InfoNCE)
-        loss = F.cross_entropy(similarity_matrix, labels)
+        # Create mask to remove self-similarities (diagonal)
+        mask = torch.eye(2 * batch_size, dtype=torch.bool, device=z.device)
+        sim_matrix = sim_matrix.masked_fill(mask, -float('inf'))
         
-        return loss
+        # Positive pairs: (i, i+batch_size) and (i+batch_size, i)
+        pos_indices = torch.cat([
+            torch.arange(batch_size, 2 * batch_size, device=z.device),  # for z1
+            torch.arange(0, batch_size, device=z.device)  # for z2
+        ])
+        
+        # Extract positive similarities
+        pos_sim = sim_matrix[torch.arange(2 * batch_size, device=z.device), pos_indices]
+        
+        # Compute log-sum-exp for denominator (all similarities except self)
+        exp_sim = torch.exp(sim_matrix)
+        sum_exp_sim = exp_sim.sum(dim=1)
+        
+        # NT-Xent loss: -log(exp(pos_sim) / sum(exp(all_sim_except_self)))
+        loss = -torch.log(torch.exp(pos_sim) / sum_exp_sim)
+        
+        return loss.mean()
+
+
+# Compatibility alias for the naming convention used by MInterface
+# The framework expects snake_case -> CamelCase conversion
+# So 'contrastive' -> 'Contrastive'
+Contrastive = ContrastiveEGNN
