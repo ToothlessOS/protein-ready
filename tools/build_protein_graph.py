@@ -100,8 +100,6 @@ def convert_to_pytorch(graph):
     # Initialize client if not already done
     esm_client = initialize_esm_client()
     
-    node_mapping = {node: idx for idx, node in enumerate(graph.nodes())}
-
     # Generate ESM embeddings for each chain
     chain_embeddings = {}
     for chain_id, seq in graph.graph["sequences"].items():
@@ -113,38 +111,42 @@ def convert_to_pytorch(graph):
         embeddings_trimmed = logits_output.embeddings[:, 1:-1].squeeze(0)  # Remove batch and special tokens
         chain_embeddings[chain_id] = embeddings_trimmed
 
-    # Extract node features and coordinates aligned with graph nodes
+    # First pass: collect valid nodes (those with coordinates AND embeddings)
+    valid_nodes = []
     node_features = []
     node_coordinates = []
     
     for node in graph.nodes():
-        # Extract chain and residue info from node ID
         node_data = graph.nodes[node]
         chain_id = node_data.get('chain_id')
         residue_number = node_data.get('residue_number')
         
         # Get coordinates
         coords = node_coords(graph, node)
+        
+        # Check if we have both coordinates and valid embedding
         if coords is not None and len(coords) == 3:
-            node_coordinates.append(coords)
-            
-            # Get corresponding ESM embedding
-            # residue_number is 1-indexed, but embeddings are 0-indexed
             embedding_idx = residue_number - 1
             if chain_id in chain_embeddings and 0 <= embedding_idx < len(chain_embeddings[chain_id]):
+                # Only include nodes that have both valid coordinates and embeddings
+                valid_nodes.append(node)
+                node_coordinates.append(coords)
                 node_features.append(chain_embeddings[chain_id][embedding_idx])
             else:
-                # Fallback: use zero embedding if mapping fails
-                embedding_dim = chain_embeddings[list(chain_embeddings.keys())[0]].shape[1]
-                node_features.append(torch.zeros(embedding_dim))
-                print(f"Warning: No embedding found for node {node}, chain {chain_id}, residue {residue_number}")
+                print(f"Warning: No valid embedding for node {node}, chain {chain_id}, residue {residue_number}")
+        else:
+            print(f"Warning: No valid coordinates for node {node}")
+    
+    # Create mapping only for valid nodes
+    node_mapping = {node: idx for idx, node in enumerate(valid_nodes)}
     
     node_features = torch.stack(node_features)
     node_coords_tensor = torch.tensor(node_coordinates, dtype=torch.float32)
     
+    print(f"Valid nodes: {len(valid_nodes)}")
     print(f"Final aligned shapes - Features: {node_features.shape}, Coords: {node_coords_tensor.shape}")
 
-    # Extract edge indices and attributes
+    # Extract edge indices and attributes - only for edges between valid nodes
     edge_indices = []
     edge_attrs = []
     
@@ -166,37 +168,38 @@ def convert_to_pytorch(graph):
     }
 
     for u, v, edge_data in graph.edges(data=True):
-        # Ensure that u and v are mapped to integers
-        u_idx = node_mapping[u]
-        v_idx = node_mapping[v]
-        edge_indices.append([u_idx, v_idx])
-        edge_indices.append([v_idx, u_idx])
+        # Only include edges between valid nodes
+        if u in node_mapping and v in node_mapping:
+            u_idx = node_mapping[u]
+            v_idx = node_mapping[v]
+            edge_indices.append([u_idx, v_idx])
+            edge_indices.append([v_idx, u_idx])
 
-        # Handle edge kind - it could be a set or list
-        edge_kind = edge_data.get('kind', set())
-        if isinstance(edge_kind, set):
-            edge_kind = list(edge_kind)
-        
-        # Initialize edge feature vector [physio_chemical_1-7, distance_metric_1-3, distance]
-        physio_chemical_vector = [0, 0, 0, 0, 0, 0, 0]  # Default: no physio-chemical interaction
-        distance_metric_vector = [0, 0, 0]  # Default: no distance-based metric
-        
-        # Categorize edge types - accumulate multiple metrics
-        for kind in edge_kind:
-            if kind in physio_chemical_mapping:
-                # Add the physio-chemical values instead of replacing
-                for i, val in enumerate(physio_chemical_mapping[kind]):
-                    physio_chemical_vector[i] += val
-            elif kind in distance_metric_mapping:
-                # Add the distance metric values instead of replacing
-                for i, val in enumerate(distance_metric_mapping[kind]):
-                    distance_metric_vector[i] += val
-        
-        dist = edge_data.get('distance', 0.0)
-        
-        # Create 11D edge feature: [physio_chemical_1-7, distance_metric_1-3, distance]
-        edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
-        edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
+            # Handle edge kind - it could be a set or list
+            edge_kind = edge_data.get('kind', set())
+            if isinstance(edge_kind, set):
+                edge_kind = list(edge_kind)
+            
+            # Initialize edge feature vector [physio_chemical_1-7, distance_metric_1-3, distance]
+            physio_chemical_vector = [0, 0, 0, 0, 0, 0, 0]  # Default: no physio-chemical interaction
+            distance_metric_vector = [0, 0, 0]  # Default: no distance-based metric
+            
+            # Categorize edge types - accumulate multiple metrics
+            for kind in edge_kind:
+                if kind in physio_chemical_mapping:
+                    # Add the physio-chemical values instead of replacing
+                    for i, val in enumerate(physio_chemical_mapping[kind]):
+                        physio_chemical_vector[i] += val
+                elif kind in distance_metric_mapping:
+                    # Add the distance metric values instead of replacing
+                    for i, val in enumerate(distance_metric_mapping[kind]):
+                        distance_metric_vector[i] += val
+            
+            dist = edge_data.get('distance', 0.0)
+            
+            # Create 11D edge feature: [physio_chemical_1-7, distance_metric_1-3, distance]
+            edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
+            edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
     
     edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(edge_attrs, dtype=torch.float32)
@@ -204,8 +207,10 @@ def convert_to_pytorch(graph):
     print(f"Final shapes - Features: {node_features.shape}, Coords: {node_coords_tensor.shape}")
     print(f"Final shapes - Edge Index: {edge_index.shape}, Edge Attr: {edge_attr.shape}")
 
-    print(node_features)
-    print(edge_index)
+    # Validation checks
+    assert node_features.shape[0] == node_coords_tensor.shape[0], "Node features and coordinates must have same length"
+    assert edge_index.max() < len(valid_nodes), "Edge indices must be within valid node range"
+    assert edge_attr.shape[0] == edge_index.shape[1], "Edge attributes and edge indices must have same length"
 
     return {
         'node_features': node_features,
