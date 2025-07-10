@@ -100,8 +100,6 @@ def convert_to_pytorch(graph):
     # Initialize client if not already done
     esm_client = initialize_esm_client()
     
-    node_mapping = {node: idx for idx, node in enumerate(graph.nodes())}
-
     # Generate ESM embeddings for each chain
     chain_embeddings = {}
     for chain_id, seq in graph.graph["sequences"].items():
@@ -113,92 +111,129 @@ def convert_to_pytorch(graph):
         embeddings_trimmed = logits_output.embeddings[:, 1:-1].squeeze(0)  # Remove batch and special tokens
         chain_embeddings[chain_id] = embeddings_trimmed
 
-    # Extract node features and coordinates aligned with graph nodes
+    # Add debugging for chain embeddings
+    print(f"Available chains in embeddings: {list(chain_embeddings.keys())}")
+    for chain_id, embedding in chain_embeddings.items():
+        print(f"Chain {chain_id}: {embedding.shape[0]} embeddings")
+    
+    # Create sequential mapping for each chain by sorting nodes by residue number
+    chain_node_mapping = {}
+    for node in graph.nodes():
+        node_data = graph.nodes[node]
+        chain_id = node_data.get('chain_id')
+        if chain_id not in chain_node_mapping:
+            chain_node_mapping[chain_id] = []
+        chain_node_mapping[chain_id].append(node)
+    
+    # Sort nodes by residue number for each chain to create sequential mapping
+    for chain_id in chain_node_mapping:
+        chain_node_mapping[chain_id].sort(key=lambda x: graph.nodes[x].get('residue_number', 0))
+    
+    # First pass: collect valid nodes (those with coordinates AND embeddings)
+    valid_nodes = []
     node_features = []
     node_coordinates = []
     
     for node in graph.nodes():
-        # Extract chain and residue info from node ID
         node_data = graph.nodes[node]
         chain_id = node_data.get('chain_id')
-        residue_number = node_data.get('residue_number')
         
         # Get coordinates
         coords = node_coords(graph, node)
+        
         if coords is not None and len(coords) == 3:
-            node_coordinates.append(coords)
-            
-            # Get corresponding ESM embedding
-            # residue_number is 1-indexed, but embeddings are 0-indexed
-            embedding_idx = residue_number - 1
-            if chain_id in chain_embeddings and 0 <= embedding_idx < len(chain_embeddings[chain_id]):
-                node_features.append(chain_embeddings[chain_id][embedding_idx])
-            else:
-                # Fallback: use zero embedding if mapping fails
-                embedding_dim = chain_embeddings[list(chain_embeddings.keys())[0]].shape[1]
-                node_features.append(torch.zeros(embedding_dim))
-                print(f"Warning: No embedding found for node {node}, chain {chain_id}, residue {residue_number}")
+            # Use sequential index instead of PDB residue number
+            try:
+                sequential_idx = chain_node_mapping[chain_id].index(node)
+                
+                if chain_id in chain_embeddings and 0 <= sequential_idx < len(chain_embeddings[chain_id]):
+                    # Only include nodes that have both valid coordinates and embeddings
+                    valid_nodes.append(node)
+                    node_coordinates.append(coords)
+                    node_features.append(chain_embeddings[chain_id][sequential_idx])
+                else:
+                    print(f"Debug: Sequential index {sequential_idx} out of bounds for chain {chain_id} (size: {len(chain_embeddings[chain_id]) if chain_id in chain_embeddings else 0})")
+            except ValueError:
+                print(f"Debug: Node {node} not found in chain mapping for chain {chain_id}")
+        
+    # Create mapping only for valid nodes
+    node_mapping = {node: idx for idx, node in enumerate(valid_nodes)}
     
+    if len(node_features) == 0:
+        print("Warning: No valid nodes found with both coordinates and embeddings")
+        return None
+        
     node_features = torch.stack(node_features)
     node_coords_tensor = torch.tensor(node_coordinates, dtype=torch.float32)
     
+    print(f"Valid nodes: {len(valid_nodes)}")
     print(f"Final aligned shapes - Features: {node_features.shape}, Coords: {node_coords_tensor.shape}")
 
-    # Extract edge indices and attributes
+    # Extract edge indices and attributes - only for edges between valid nodes
     edge_indices = []
     edge_attrs = []
     
     # Separate physio-chemical properties from distance-based metrics
     physio_chemical_mapping = {
-        'peptide_bond': 1,
-        'hbond': 2,
-        'disulfide': 3,
-        'ionic': 4,
-        'aromatic': 5,
-        'aromatic_sulfur': 6,
-        'cation_pi': 7,
+        'peptide_bond': [1, 0, 0, 0, 0, 0, 0],
+        'hbond': [0, 1, 0, 0, 0, 0, 0],
+        'disulfide': [0, 0, 1, 0, 0, 0, 0],
+        'ionic': [0, 0, 0, 1, 0, 0, 0],
+        'aromatic': [0, 0, 0, 0, 1, 0, 0],
+        'aromatic_sulfur': [0, 0, 0, 0, 0, 1, 0],
+        'cation_pi': [0, 0, 0, 0, 0, 0, 1],
     }
     
     distance_metric_mapping = {
-        'distance_threshold': 1,
-        'sequence_distance': 2,
-        'k_nn': 3,
+        'sequence_edge': [1, 0, 0],
+        'knn': [0, 1, 0], 
+        'distance_threshold': [0, 0, 1],
     }
 
     for u, v, edge_data in graph.edges(data=True):
-        # Ensure that u and v are mapped to integers
-        u_idx = node_mapping[u]
-        v_idx = node_mapping[v]
-        edge_indices.append([u_idx, v_idx])
-        edge_indices.append([v_idx, u_idx])
+        # Only include edges between valid nodes
+        if u in node_mapping and v in node_mapping:
+            u_idx = node_mapping[u]
+            v_idx = node_mapping[v]
+            edge_indices.append([u_idx, v_idx])
+            edge_indices.append([v_idx, u_idx])
 
-        # Handle edge kind - it could be a set or list
-        edge_kind = edge_data.get('kind', set())
-        if isinstance(edge_kind, set):
-            edge_kind = list(edge_kind)
-        
-        # Initialize edge feature vector [physio_chemical, distance_metric, distance]
-        physio_chemical_type = 0  # Default: no physio-chemical interaction
-        distance_metric_type = 0  # Default: no distance-based metric
-        
-        # Categorize edge types
-        for kind in edge_kind:
-            if kind in physio_chemical_mapping:
-                physio_chemical_type = physio_chemical_mapping[kind]
-            elif kind in distance_metric_mapping:
-                distance_metric_type = distance_metric_mapping[kind]
-        
-        dist = edge_data.get('distance', 0.0)
-        
-        # Create 3D edge feature: [physio_chemical_type, distance_metric_type, distance]
-        edge_attrs.append([physio_chemical_type, distance_metric_type, dist])
-        edge_attrs.append([physio_chemical_type, distance_metric_type, dist])
+            # Handle edge kind - it could be a set or list
+            edge_kind = edge_data.get('kind', set())
+            if isinstance(edge_kind, set):
+                edge_kind = list(edge_kind)
+            
+            # Initialize edge feature vector [physio_chemical_1-7, distance_metric_1-3, distance]
+            physio_chemical_vector = [0, 0, 0, 0, 0, 0, 0]  # Default: no physio-chemical interaction
+            distance_metric_vector = [0, 0, 0]  # Default: no distance-based metric
+            
+            # Categorize edge types - accumulate multiple metrics
+            for kind in edge_kind:
+                if kind in physio_chemical_mapping:
+                    # Add the physio-chemical values instead of replacing
+                    for i, val in enumerate(physio_chemical_mapping[kind]):
+                        physio_chemical_vector[i] += val
+                elif kind in distance_metric_mapping:
+                    # Add the distance metric values instead of replacing
+                    for i, val in enumerate(distance_metric_mapping[kind]):
+                        distance_metric_vector[i] += val
+            
+            dist = edge_data.get('distance', 0.0)
+            
+            # Create 11D edge feature: [physio_chemical_1-7, distance_metric_1-3, distance]
+            edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
+            edge_attrs.append(physio_chemical_vector + distance_metric_vector + [dist])
     
     edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(edge_attrs, dtype=torch.float32)
 
     print(f"Final shapes - Features: {node_features.shape}, Coords: {node_coords_tensor.shape}")
     print(f"Final shapes - Edge Index: {edge_index.shape}, Edge Attr: {edge_attr.shape}")
+
+    # Validation checks
+    assert node_features.shape[0] == node_coords_tensor.shape[0], "Node features and coordinates must have same length"
+    assert edge_index.max() < len(valid_nodes), "Edge indices must be within valid node range"
+    assert edge_attr.shape[0] == edge_index.shape[1], "Edge attributes and edge indices must have same length"
 
     return {
         'node_features': node_features,
@@ -214,7 +249,7 @@ def process_single_protein(protein, config, save_dir, base_path):
     """
     try:
         # Construct full path to the protein file
-        protein_file_path = os.path.join(base_path, protein, f"{protein}_protein_processed.pdb")
+        protein_file_path = os.path.join(base_path, protein, f"{protein}_protein.pdb")
         
         # Check if file exists
         if not os.path.exists(protein_file_path):
@@ -232,6 +267,11 @@ def process_single_protein(protein, config, save_dir, base_path):
 
         # Convert to native PyTorch format
         pytorch_graph = convert_to_pytorch(graph)
+        
+        # Check if conversion was successful
+        if pytorch_graph is None:
+            print(f"Failed to convert {protein}: No valid nodes found")
+            return
 
         # Save the graph
         save_path = os.path.join(save_dir, f"pytorch_graph_{protein}.pt")
@@ -272,10 +312,13 @@ if __name__ == "__main__":
     # Set spawn method for CUDA compatibility
     set_start_method('spawn', force=True)
     
-    base_path = "../dataset/diff_MOAD"
+    base_path = "../dataset/astex_diverse_set"
     save_dir = "../dataset/protein_g"
     os.makedirs(save_dir, exist_ok=True)
-    with open('../dataset/chosen_train', 'r') as f:
-        proteins = [line.strip() for line in f]
-    # proteins = os.listdir(base_path)
-    parallel_process_proteins(proteins, config, save_dir, num_workers=4, chunk_size=100, base_path=base_path)
+    
+    # Get all protein directories from the base path
+    proteins = [d for d in os.listdir(base_path) 
+                if os.path.isdir(os.path.join(base_path, d))]
+    
+    print(f"Found {len(proteins)} protein directories to process")
+    parallel_process_proteins(proteins, config, save_dir, num_workers=2, chunk_size=40, base_path=base_path)

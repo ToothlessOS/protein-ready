@@ -19,6 +19,7 @@ from torch.nn import functional as F
 import torch.optim.lr_scheduler as lrs
 
 import pytorch_lightning as pl
+import numpy as np
 
 
 class MInterface(pl.LightningModule):
@@ -28,30 +29,60 @@ class MInterface(pl.LightningModule):
         self.load_model()
         self.configure_loss()
 
-    def forward(self, img):
-        return self.model(img)
+    def forward(self, batch_data):
+        # Extract the two views directly from batch
+        view1 = batch_data['view1']
+        view2 = batch_data['view2']
+
+        print(view1['edge_attr'].shape)
+        
+        # Forward pass through view1
+        logits1, _ = self.model(
+            node_features=view1['node_features'],
+            edge_index=view1['edge_index'],
+            node_pos=view1['node_pos'],
+            edge_attr=view1['edge_attr'],
+            batch=view1.get('batch', None)
+        )
+        
+        # Forward pass through view2
+        logits2, _ = self.model(
+            node_features=view2['node_features'],
+            edge_index=view2['edge_index'],
+            node_pos=view2['node_pos'],
+            edge_attr=view2['edge_attr'],
+            batch=view2.get('batch', None)
+        )
+        
+        return logits1, logits2
 
     def training_step(self, batch, batch_idx):
-        img, labels, filename = batch
-        out = self(img)
-        loss = self.loss_function(out, labels)
+        # Skip batch if there was a load error
+        if batch['load_error']:
+            return None
+            
+        logits1, logits2 = self(batch)
+        loss = self.loss_function(logits1, logits2)
+        
         self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Log learning rate
+        opt = self.optimizers() if hasattr(self, "optimizers") else None
+        if opt is not None:
+            lr = opt.param_groups[0]['lr']
+            self.log('lr', lr, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        img, labels, filename = batch
-        out = self(img)
-        loss = self.loss_function(out, labels)
-        label_digit = labels.argmax(axis=1)
-        out_digit = out.argmax(axis=1)
-
-        correct_num = sum(label_digit == out_digit).cpu().item()
-
+        # Skip batch if there was a load error
+        if batch['load_error']:
+            return None
+            
+        logits1, logits2 = self(batch)
+        loss = self.loss_function(logits1, logits2)
+        
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_acc', correct_num/len(out_digit),
-                 on_step=False, on_epoch=True, prog_bar=True)
-
-        return (correct_num, len(out_digit))
+        
+        return {'val_loss': loss, 'protein_id': batch['protein_id']}
 
     def test_step(self, batch, batch_idx):
         # Here we just reuse the validation_step for testing
@@ -72,26 +103,44 @@ class MInterface(pl.LightningModule):
         if self.hparams.lr_scheduler is None:
             return optimizer
         else:
-            if self.hparams.lr_scheduler == 'step':
-                scheduler = lrs.StepLR(optimizer,
-                                       step_size=self.hparams.lr_decay_steps,
-                                       gamma=self.hparams.lr_decay_rate)
+            if self.hparams.lr_scheduler == 'reduce-on-plateau':
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode='min', factor=self.hparams.lr_decay_ratio, patience=self.hparams.lr_decay_patience, min_lr=self.hparams.lr_decay_min_lr
+                )
             elif self.hparams.lr_scheduler == 'cosine':
-                scheduler = lrs.CosineAnnealingLR(optimizer,
-                                                  T_max=self.hparams.lr_decay_steps,
-                                                  eta_min=self.hparams.lr_decay_min_lr)
+                warmup_epochs = self.hparams.lr_cosine_warmup_epochs
+                max_epochs = self.hparams.max_epochs
+                decay_ratio = self.hparams.lr_cosine_decay_ratio
+                cycle_length = self.hparams.lr_cosine_cycle_length
+
+                def combined_lr_lambda(epoch):
+                    if epoch < warmup_epochs:
+                        # Linear warm-up phase
+                        return epoch / warmup_epochs
+                    else:
+                        # After warm-up: combine decay with cyclic behavior
+                        progress = (epoch - warmup_epochs) / (max_epochs - warmup_epochs)
+                    
+                        # Exponential decay component
+                        decay_factor = decay_ratio ** ((epoch - warmup_epochs) // 10)
+
+                        # Cyclic component (triangular wave)
+                        cycle_progress = ((epoch - warmup_epochs) % cycle_length) / cycle_length
+                        cyclic_factor = 1.0 + 0.5 * np.sin(2 * np.pi * cycle_progress)
+                    
+                        return decay_factor * cyclic_factor
+            
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, combined_lr_lambda)
             else:
                 raise ValueError('Invalid lr_scheduler type!')
             return [optimizer], [scheduler]
 
     def configure_loss(self):
         loss = self.hparams.loss.lower()
-        if loss == 'mse':
-            self.loss_function = F.mse_loss
-        elif loss == 'l1':
-            self.loss_function = F.l1_loss
-        elif loss == 'bce':
-            self.loss_function = F.binary_cross_entropy
+        if loss == 'contrastive' or loss == 'ntxent':
+            from .contrastive import ContrastiveLoss
+            temperature = getattr(self.hparams, 'temperature', 0.07)
+            self.loss_function = ContrastiveLoss(temperature=temperature)
         else:
             raise ValueError("Invalid Loss Type!")
 
