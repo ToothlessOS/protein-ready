@@ -82,9 +82,9 @@ def main(args):
         callbacks=callbacks,
         logger=getattr(args, 'logger', True),
         check_val_every_n_epoch=getattr(args, 'check_val_every_n_epoch', 1),
-        enable_checkpointing=getattr(args, 'enable_checkpointing', True),
-        enable_progress_bar=getattr(args, 'enable_progress_bar', True),
-        enable_model_summary=getattr(args, 'enable_model_summary', True),
+        val_check_interval=getattr(args, 'val_check_interval', 1.0),
+        num_sanity_val_steps=getattr(args, 'num_sanity_val_steps', 2),
+        log_every_n_steps=getattr(args, 'log_every_n_steps', 1),
         precision=getattr(args, 'precision', '32-true'),
         fast_dev_run=getattr(args, 'fast_dev_run', False),
         limit_train_batches=getattr(args, 'limit_train_batches', 1.0),
@@ -102,13 +102,15 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--lr', default=1e-3, type=float)
+    parser.add_argument('--lr', default=1e-4, type=float)
 
     # LR Scheduler
-    parser.add_argument('--lr_scheduler', choices=['step', 'cosine'], type=str)
-    parser.add_argument('--lr_decay_steps', default=20, type=int)
-    parser.add_argument('--lr_decay_rate', default=0.5, type=float)
-    parser.add_argument('--lr_decay_min_lr', default=1e-5, type=float)
+    parser.add_argument('--lr_scheduler', choices=['reduce-on-plateau', 'cosine'], type=str, default='cosine')
+    parser.add_argument('--lr_decay_ratio', default=0.95, type=float)
+    parser.add_argument('--lr_decay_patience', default=4, type=int)
+    parser.add_argument('--lr_cosine_warmup_epochs', default=10, type=int)
+    parser.add_argument('--lr_cosine_cycle_length', default=20, type=float)
+    parser.add_argument('--lr_cosine_decay_ratio', default=0.99, type=float)
 
     # Restart Control
     parser.add_argument('--load_best', action='store_true')
@@ -119,6 +121,8 @@ if __name__ == '__main__':
     # Training Info
     parser.add_argument('--dataset', default='protein_dataset', type=str)
     parser.add_argument('--data_path', default='dataset/protein_g/', type=str)
+    parser.add_argument('--complete_graph_percent', default=0, type=int, help='Percentage of complete graphs in the dataset') # Different from GearNet
+    parser.add_argument('--test_percent', default=0.1, type=float, help='Percentage of data used for testing')
     parser.add_argument('--model_name', default='contrastive', type=str)
     parser.add_argument('--loss', default='contrastive', type=str)
     parser.add_argument('--weight_decay', default=1e-5, type=float)
@@ -145,18 +149,10 @@ if __name__ == '__main__':
     parser.add_argument('--devices', default='auto')
     parser.add_argument('--precision', default='32-true', type=str)
     parser.add_argument('--fast_dev_run', action='store_true')
-    parser.add_argument('--limit_train_batches', default=1.0, type=float)
-    parser.add_argument('--limit_val_batches', default=1.0, type=float)
-    parser.add_argument('--limit_test_batches', default=1.0, type=float)
-    
-    # Legacy parameters (kept for compatibility)
-    parser.add_argument('--hid', default=64, type=int)
-    parser.add_argument('--block_num', default=8, type=int)
-    parser.add_argument('--in_channel', default=3, type=int)
-    parser.add_argument('--layer_num', default=5, type=int)
-
-    # Other
-    parser.add_argument('--aug_prob', default=0.5, type=float)
+    parser.add_argument('--check_val_every_n_epoch', default=1, type=int, help='Run validation every N epochs')
+    parser.add_argument('--val_check_interval', default=1.0, type=float, help='Validation check interval (fraction of epoch or steps)')
+    parser.add_argument('--num_sanity_val_steps', default=2, type=int, help='Number of validation steps to run before training')
+    parser.add_argument('--log_every_n_steps', default=1, type=int, help='Log every N steps (set to 1 for small datasets)')
     
     # Dataset and caching parameters
     parser.add_argument('--cache_size', default=512, type=int, help='Cache size for dataset')

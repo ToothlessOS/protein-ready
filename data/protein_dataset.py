@@ -74,7 +74,7 @@ class ProteinDataset(Dataset):
         
         # Split the dataset into train and test sets
         train_files, test_files = train_test_split(
-            self.file_paths, test_size=0.005, random_state=self.seed)
+            self.file_paths, test_size=0.1, random_state=self.seed)
         
         if self.train:
             self.file_paths = train_files
@@ -216,28 +216,41 @@ class ProteinDataset(Dataset):
                 'view2': None
             }
         
-        # Generate two contrastive views with same processing
-        # Randomly choose sampling strategy (50/50 chance for sequential vs distance-based)
-        use_sequential = random.random() < 0.5
-        # Randomly choose whether to apply masking (50/50 chance)
-        apply_masking = random.random() < 0.5
-        
-        if use_sequential:
+        # Generate two contrastive views with new sampling probabilities
+        a = getattr(self, 'complete_graph_percent', 0)  # Set this attribute when initializing if needed
+        complete_prob = a / 100.0
+        seq_prob = (50 - 0.5 * a) / 100.0
+        dist_prob = seq_prob  # Both are equal
+
+        rand_val = random.random()
+        if rand_val < complete_prob:
+            # Use complete graph for both views
+            view1 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
+            view2 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
+            sampling_strategy = 'complete'
+        elif rand_val < complete_prob + seq_prob:
             # Sequential sampling for both views
             view1 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)
             view2 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)
+            sampling_strategy = 'sequential'
         else:
             # Distance-based sampling for both views
             view1 = self.subgraph_sampler.sample_distance_subgraph(protein_graph)
             view2 = self.subgraph_sampler.sample_distance_subgraph(protein_graph)
-        
+            sampling_strategy = 'distance'
+
+        # Randomly choose whether to apply masking (50/50 chance)
+        apply_masking = random.random() < 0.5
+
         # Apply same noise transformation to both views
         if apply_masking:
             view1 = self.subgraph_sampler.apply_noise(view1, "random_edge_masking", edge_mask_prob=0.15)
             view2 = self.subgraph_sampler.apply_noise(view2, "random_edge_masking", edge_mask_prob=0.15)
+            noise_applied = 'masking'
         else:
             view1 = self.subgraph_sampler.apply_noise(view1, "identity")
             view2 = self.subgraph_sampler.apply_noise(view2, "identity")
+            noise_applied = 'identity'
                 
         return {
             'protein_graph': protein_graph,
@@ -247,6 +260,6 @@ class ProteinDataset(Dataset):
             'load_error': False,
             'view1': view1,
             'view2': view2,
-            'sampling_strategy': 'sequential' if use_sequential else 'distance',
-            'noise_applied': 'masking' if apply_masking else 'identity'
+            'sampling_strategy': sampling_strategy,
+            'noise_applied': noise_applied
         }

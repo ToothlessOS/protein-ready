@@ -196,36 +196,47 @@ class ContrastiveLoss(nn.Module):
         """
         batch_size = z1.size(0)
         
-        # Normalize embeddings
+        # Step 1: Normalize embeddings to unit vectors
+        # This ensures cosine similarity is computed correctly
         z1 = F.normalize(z1, dim=1)
         z2 = F.normalize(z2, dim=1)
         
-        # Concatenate both views: [2*batch_size, embedding_dim]
+        # Step 2: Concatenate embeddings from both views
+        # Resulting tensor shape: [2*batch_size, embedding_dim]
         z = torch.cat([z1, z2], dim=0)
         
-        # Compute similarity matrix: [2*batch_size, 2*batch_size]
+        # Step 3: Compute pairwise cosine similarity matrix
+        # Shape: [2*batch_size, 2*batch_size]
+        # Divide by temperature to scale the similarities
         sim_matrix = torch.matmul(z, z.T) / self.temperature
         
-        # Create mask to remove self-similarities (diagonal)
+        # Step 4: Create a mask to remove self-similarities (diagonal entries)
+        # Self-similarities are not considered in the loss calculation
         mask = torch.eye(2 * batch_size, dtype=torch.bool, device=z.device)
         sim_matrix = sim_matrix.masked_fill(mask, -float('inf'))
         
-        # Positive pairs: (i, i+batch_size) and (i+batch_size, i)
+        # Step 5: Identify positive pairs
+        # Positive pairs are (i, i+batch_size) and (i+batch_size, i)
+        # These correspond to embeddings from the same sample but different augmentations
         pos_indices = torch.cat([
             torch.arange(batch_size, 2 * batch_size, device=z.device),  # for z1
             torch.arange(0, batch_size, device=z.device)  # for z2
         ])
         
-        # Extract positive similarities
+        # Step 6: Extract positive similarities from the similarity matrix
+        # Positive similarities are located at specific indices in the matrix
         pos_sim = sim_matrix[torch.arange(2 * batch_size, device=z.device), pos_indices]
         
-        # Compute log-sum-exp for denominator (all similarities except self)
+        # Step 7: Compute the denominator using log-sum-exp
+        # Denominator includes all similarities except self-similarities
         exp_sim = torch.exp(sim_matrix)
         sum_exp_sim = exp_sim.sum(dim=1)
         
-        # NT-Xent loss: -log(exp(pos_sim) / sum(exp(all_sim_except_self)))
+        # Step 8: Compute NT-Xent loss for each sample
+        # Loss formula: -log(exp(pos_sim) / sum(exp(all_sim_except_self)))
         loss = -torch.log(torch.exp(pos_sim) / sum_exp_sim)
         
+        # Step 9: Return the mean loss across all samples
         return loss.mean()
 
 

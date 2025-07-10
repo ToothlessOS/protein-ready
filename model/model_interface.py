@@ -19,6 +19,7 @@ from torch.nn import functional as F
 import torch.optim.lr_scheduler as lrs
 
 import pytorch_lightning as pl
+import numpy as np
 
 
 class MInterface(pl.LightningModule):
@@ -32,6 +33,8 @@ class MInterface(pl.LightningModule):
         # Extract the two views directly from batch
         view1 = batch_data['view1']
         view2 = batch_data['view2']
+
+        print(view1['edge_attr'].shape)
         
         # Forward pass through view1
         logits1, _ = self.model(
@@ -62,6 +65,11 @@ class MInterface(pl.LightningModule):
         loss = self.loss_function(logits1, logits2)
         
         self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Log learning rate
+        opt = self.optimizers() if hasattr(self, "optimizers") else None
+        if opt is not None:
+            lr = opt.param_groups[0]['lr']
+            self.log('lr', lr, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -95,14 +103,34 @@ class MInterface(pl.LightningModule):
         if self.hparams.lr_scheduler is None:
             return optimizer
         else:
-            if self.hparams.lr_scheduler == 'step':
-                scheduler = lrs.StepLR(optimizer,
-                                       step_size=self.hparams.lr_decay_steps,
-                                       gamma=self.hparams.lr_decay_rate)
+            if self.hparams.lr_scheduler == 'reduce-on-plateau':
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode='min', factor=self.hparams.lr_decay_ratio, patience=self.hparams.lr_decay_patience, min_lr=self.hparams.lr_decay_min_lr
+                )
             elif self.hparams.lr_scheduler == 'cosine':
-                scheduler = lrs.CosineAnnealingLR(optimizer,
-                                                  T_max=self.hparams.lr_decay_steps,
-                                                  eta_min=self.hparams.lr_decay_min_lr)
+                warmup_epochs = self.hparams.lr_cosine_warmup_epochs
+                max_epochs = self.hparams.max_epochs
+                decay_ratio = self.hparams.lr_cosine_decay_ratio
+                cycle_length = self.hparams.lr_cosine_cycle_length
+
+                def combined_lr_lambda(epoch):
+                    if epoch < warmup_epochs:
+                        # Linear warm-up phase
+                        return epoch / warmup_epochs
+                    else:
+                        # After warm-up: combine decay with cyclic behavior
+                        progress = (epoch - warmup_epochs) / (max_epochs - warmup_epochs)
+                    
+                        # Exponential decay component
+                        decay_factor = decay_ratio ** ((epoch - warmup_epochs) // 10)
+
+                        # Cyclic component (triangular wave)
+                        cycle_progress = ((epoch - warmup_epochs) % cycle_length) / cycle_length
+                        cyclic_factor = 1.0 + 0.5 * np.sin(2 * np.pi * cycle_progress)
+                    
+                        return decay_factor * cyclic_factor
+            
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, combined_lr_lambda)
             else:
                 raise ValueError('Invalid lr_scheduler type!')
             return [optimizer], [scheduler]
