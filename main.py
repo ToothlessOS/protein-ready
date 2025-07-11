@@ -153,7 +153,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='protein_dataset', type=str)
     parser.add_argument('--data_path', default='dataset/protein_g/', type=str)
     parser.add_argument('--complete_graph_percent', default=0, type=int, help='Percentage of complete graphs in the dataset') # Different from GearNet
-    parser.add_argument('--test_percent', default=0.1, type=float, help='Percentage of data used for testing')
+    parser.add_argument('--test_percent', default=0.01, type=float, help='Percentage of data used for testing')
     parser.add_argument('--model_name', default='contrastive', type=str)
     parser.add_argument('--loss', default='contrastive', type=str)
     parser.add_argument('--weight_decay', default=1e-5, type=float)

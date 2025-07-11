@@ -243,18 +243,21 @@ def convert_to_pytorch(graph):
         'num_nodes': len(node_features)
     }
 
-def process_single_protein(protein, config, save_dir, base_path):
+def process_single_protein(protein_filename, config, save_dir, base_path):
     """
     Process a single protein to generate a native PyTorch graph.
     """
     try:
         # Construct full path to the protein file
-        protein_file_path = os.path.join(base_path, protein, f"{protein}_protein.pdb")
+        protein_file_path = os.path.join(base_path, protein_filename)
         
         # Check if file exists
         if not os.path.exists(protein_file_path):
             print(f"File not found: {protein_file_path}")
             return
+            
+        # Extract protein name from filename (remove .pdb extension)
+        protein_name = os.path.splitext(protein_filename)[0]
             
         # Extract sequences for all chains
         chain_sequences = get_sequences_from_pdb(protein_file_path)
@@ -270,16 +273,16 @@ def process_single_protein(protein, config, save_dir, base_path):
         
         # Check if conversion was successful
         if pytorch_graph is None:
-            print(f"Failed to convert {protein}: No valid nodes found")
+            print(f"Failed to convert {protein_name}: No valid nodes found")
             return
 
         # Save the graph
-        save_path = os.path.join(save_dir, f"pytorch_graph_{protein}.pt")
+        save_path = os.path.join(save_dir, f"pytorch_graph_{protein_name}.pt")
         torch.save(pytorch_graph, save_path)
-        print(f"Successfully processed {protein}")
+        print(f"Successfully processed {protein_name}")
 
     except Exception as e:
-        print(f"Failed to process {protein}: {e}")
+        print(f"Failed to process {protein_filename}: {e}")
 
 def chunk_list(data, chunk_size):
     """
@@ -288,7 +291,7 @@ def chunk_list(data, chunk_size):
     for i in range(0, len(data), chunk_size):
         yield data[i:i + chunk_size]
 
-def parallel_process_proteins(proteins, config, save_dir, num_workers=4, chunk_size=100, base_path=None):
+def parallel_process_proteins(proteins, config, save_dir, num_workers=4, chunk_size=25, base_path=None):
     """
     Process multiple proteins in parallel.
     """
@@ -305,20 +308,20 @@ def process_proteins_chunk(protein_chunk, config, save_dir, base_path):
     # Initialize ESM client in this worker process
     initialize_esm_client()
     
-    for protein in protein_chunk:
-        process_single_protein(protein, config, save_dir, base_path)
+    for protein_filename in protein_chunk:
+        process_single_protein(protein_filename, config, save_dir, base_path)
 
 if __name__ == "__main__":
     # Set spawn method for CUDA compatibility
     set_start_method('spawn', force=True)
     
-    base_path = "../dataset/astex_diverse_set"
+    base_path = "../dataset/rcsb/human"
     save_dir = "../dataset/protein_g"
     os.makedirs(save_dir, exist_ok=True)
     
-    # Get all protein directories from the base path
-    proteins = [d for d in os.listdir(base_path) 
-                if os.path.isdir(os.path.join(base_path, d))]
+    # Get all PDB files from the base path
+    proteins = [f for f in os.listdir(base_path) 
+                if f.endswith('.pdb') and os.path.isfile(os.path.join(base_path, f))]
     
-    print(f"Found {len(proteins)} protein directories to process")
-    parallel_process_proteins(proteins, config, save_dir, num_workers=2, chunk_size=40, base_path=base_path)
+    print(f"Found {len(proteins)} PDB files to process")
+    parallel_process_proteins(proteins, config, save_dir, num_workers=2, chunk_size=20, base_path=base_path)
