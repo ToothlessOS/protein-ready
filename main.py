@@ -164,7 +164,7 @@ if __name__ == '__main__':
     parser.add_argument('--downstream_task', action='store_true', help='Enable downstream task mode')
     parser.add_argument('--task_type', default='classification', choices=['classification', 'regression', 'multi_label'], help='Type of downstream task')
     parser.add_argument('--num_classes', default=2, type=int, help='Number of classes for classification tasks')
-    parser.add_argument('--output_dim', default=1, type=int, help='Output dimension for regression tasks')
+    parser.add_argument('--output_dim_downstream', default=1, type=int, help='Output dimension for regression tasks')
     parser.add_argument('--pretrained_path', default=None, type=str, help='Path to pretrained model checkpoint')
     parser.add_argument('--freeze_backbone', action='store_true', help='Freeze pretrained backbone during fine-tuning')
     

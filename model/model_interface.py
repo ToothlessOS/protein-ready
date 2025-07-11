@@ -33,8 +33,6 @@ class MInterface(pl.LightningModule):
         # Extract the two views directly from batch
         view1 = batch_data['view1']
         view2 = batch_data['view2']
-
-        print(view1['edge_attr'].shape)
         
         # Forward pass through view1
         logits1, _ = self.model(
