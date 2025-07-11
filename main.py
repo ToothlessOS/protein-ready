@@ -32,6 +32,14 @@ from model import MInterface
 from data import DInterface
 from utils import load_model_path_by_args
 
+# Import downstream task interface for fine-tuning
+try:
+    from model.downstream_interface import DownstreamTaskInterface
+    DOWNSTREAM_AVAILABLE = True
+except ImportError:
+    DOWNSTREAM_AVAILABLE = False
+    print("Downstream interface not available. Only pretraining mode supported.")
+
 
 def load_callbacks():
     callbacks = []
@@ -60,14 +68,37 @@ def load_callbacks():
 
 def main(args):
     pl.seed_everything(args.seed)
-    load_path = load_model_path_by_args(args)
-    data_module = DInterface(**vars(args))
-
-    if load_path is None:
-        model = MInterface(**vars(args))
+    
+    # Check if this is a downstream task
+    is_downstream = hasattr(args, 'downstream_task') and args.downstream_task
+    
+    if is_downstream and DOWNSTREAM_AVAILABLE:
+        # Downstream task mode
+        print(f"Running downstream task: {args.task_type}")
+        
+        model = DownstreamTaskInterface(
+            task_type=args.task_type,
+            num_classes=getattr(args, 'num_classes', 2),
+            output_dim=getattr(args, 'output_dim', 1),
+            pretrained_path=getattr(args, 'pretrained_path', None),
+            freeze_backbone=getattr(args, 'freeze_backbone', True),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            lr_scheduler=args.lr_scheduler,
+            max_epochs=args.max_epochs
+        )
+        data_module = DInterface(**vars(args))
+        
     else:
-        model = MInterface(**vars(args))
-        args.ckpt_path = load_path
+        # Original pretraining mode
+        load_path = load_model_path_by_args(args)
+        data_module = DInterface(**vars(args))
+
+        if load_path is None:
+            model = MInterface(**vars(args))
+        else:
+            model = MInterface(**vars(args))
+            args.ckpt_path = load_path
 
     # # If you want to change the logger's saving folder
     # logger = TensorBoardLogger(save_dir='kfold_log', name=args.log_dir)
@@ -128,6 +159,14 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', default=1e-5, type=float)
     parser.add_argument('--no_augment', action='store_true')
     parser.add_argument('--log_dir', default='lightning_logs', type=str)
+    
+    # Downstream task arguments
+    parser.add_argument('--downstream_task', action='store_true', help='Enable downstream task mode')
+    parser.add_argument('--task_type', default='classification', choices=['classification', 'regression', 'multi_label'], help='Type of downstream task')
+    parser.add_argument('--num_classes', default=2, type=int, help='Number of classes for classification tasks')
+    parser.add_argument('--output_dim', default=1, type=int, help='Output dimension for regression tasks')
+    parser.add_argument('--pretrained_path', default=None, type=str, help='Path to pretrained model checkpoint')
+    parser.add_argument('--freeze_backbone', action='store_true', help='Freeze pretrained backbone during fine-tuning')
     
     # Model Hyperparameters
     parser.add_argument('--in_node_nf', default=960, type=int, help='Input node feature dimension (ESM embeddings)')
