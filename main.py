@@ -27,6 +27,7 @@ from pytorch_lightning import Trainer
 import pytorch_lightning.callbacks as plc
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.cli import LightningArgumentParser
+from pytorch_lightning.strategies import DDPStrategy
 
 from model import MInterface
 from data import DInterface
@@ -121,7 +122,7 @@ def main(args):
         limit_train_batches=getattr(args, 'limit_train_batches', 1.0),
         limit_val_batches=getattr(args, 'limit_val_batches', 1.0),
         limit_test_batches=getattr(args, 'limit_test_batches', 1.0),
-        strategy='ddp_find_unused_parameters=True'
+        strategy=DDPStrategy(find_unused_parameters=True)
     )
     
     ckpt_path = getattr(args, 'ckpt_path', None)
