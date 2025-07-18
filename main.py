@@ -29,18 +29,9 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.cli import LightningArgumentParser
 from pytorch_lightning.strategies import DDPStrategy
 
-from model import MInterface
-from data import DInterface
+from model import MInterface, MInterfaceLigand
+from data import DInterface, DInterfaceLigand
 from utils import load_model_path_by_args
-
-# Import downstream task interface for fine-tuning
-try:
-    from model.downstream_interface import DownstreamTaskInterface
-    DOWNSTREAM_AVAILABLE = True
-except ImportError:
-    DOWNSTREAM_AVAILABLE = False
-    print("Downstream interface not available. Only pretraining mode supported.")
-
 
 def load_callbacks():
     callbacks = []
@@ -69,37 +60,16 @@ def load_callbacks():
 
 def main(args):
     pl.seed_everything(args.seed)
-    
-    # Check if this is a downstream task
-    is_downstream = hasattr(args, 'downstream_task') and args.downstream_task
-    
-    if is_downstream and DOWNSTREAM_AVAILABLE:
-        # Downstream task mode
-        print(f"Running downstream task: {args.task_type}")
         
-        model = DownstreamTaskInterface(
-            task_type=args.task_type,
-            num_classes=getattr(args, 'num_classes', 2),
-            output_dim=getattr(args, 'output_dim', 1),
-            pretrained_path=getattr(args, 'pretrained_path', None),
-            freeze_backbone=getattr(args, 'freeze_backbone', True),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            lr_scheduler=args.lr_scheduler,
-            max_epochs=args.max_epochs
-        )
-        data_module = DInterface(**vars(args))
-        
-    else:
-        # Original pretraining mode
-        load_path = load_model_path_by_args(args)
-        data_module = DInterface(**vars(args))
+    # Original pretraining mode
+    load_path = load_model_path_by_args(args)
+    data_module = DInterface(**vars(args))
 
-        if load_path is None:
-            model = MInterface(**vars(args))
-        else:
-            model = MInterface(**vars(args))
-            args.ckpt_path = load_path
+    if load_path is None:
+        model = MInterface(**vars(args))
+    else:
+        model = MInterface(**vars(args))
+        args.ckpt_path = load_path
 
     # # If you want to change the logger's saving folder
     # logger = TensorBoardLogger(save_dir='kfold_log', name=args.log_dir)
@@ -128,6 +98,60 @@ def main(args):
     ckpt_path = getattr(args, 'ckpt_path', None)
     trainer.fit(model, data_module, ckpt_path=ckpt_path)
 
+# Pretrain ligand model
+def ligand(args):
+    pl.seed_everything(args.seed)
+    
+    # Set ligand-specific defaults if not already set
+    if not hasattr(args, 'dataset') or args.dataset == 'protein_dataset':
+        args.dataset = 'ligand_dataset'
+    if not hasattr(args, 'model_name') or args.model_name == 'contrastive':
+        args.model_name = 'gcn'  # Default to GCN for ligand models
+    if not hasattr(args, 'loss') or args.loss == 'contrastive':
+        args.loss = 'nt_xent'  # Use NT-Xent loss for ligand contrastive learning
+    if not hasattr(args, 'data_path'):
+        args.data_path = 'dataset/MolCLR_data/data/'  # Default ligand data path
+    
+    # Load model path for resuming training if specified
+    load_path = load_model_path_by_args(args)
+    
+    # Initialize ligand data module
+    data_module = DInterfaceLigand(**vars(args))
+    
+    # Initialize ligand model
+    if load_path is None:
+        model = MInterfaceLigand(**vars(args))
+    else:
+        model = MInterfaceLigand(**vars(args))
+        args.ckpt_path = load_path
+    
+    # Load callbacks (same as main function)
+    callbacks = load_callbacks()
+    
+    # Initialize trainer with same configuration as main function
+    trainer = Trainer(
+        max_epochs=getattr(args, 'max_epochs', 100),
+        accelerator=getattr(args, 'accelerator', 'auto'),
+        devices=getattr(args, 'devices', 'auto'),
+        callbacks=callbacks,
+        logger=getattr(args, 'logger', True),
+        check_val_every_n_epoch=getattr(args, 'check_val_every_n_epoch', 1),
+        val_check_interval=getattr(args, 'val_check_interval', 1.0),
+        num_sanity_val_steps=getattr(args, 'num_sanity_val_steps', 2),
+        log_every_n_steps=getattr(args, 'log_every_n_steps', 1),
+        precision=getattr(args, 'precision', '32-true'),
+        fast_dev_run=getattr(args, 'fast_dev_run', False),
+        limit_train_batches=getattr(args, 'limit_train_batches', 1.0),
+        limit_val_batches=getattr(args, 'limit_val_batches', 1.0),
+        limit_test_batches=getattr(args, 'limit_test_batches', 1.0),
+        strategy=DDPStrategy(find_unused_parameters=True)
+    )
+    
+    # Start training
+    ckpt_path = getattr(args, 'ckpt_path', None)
+    trainer.fit(model, data_module, ckpt_path=ckpt_path)
+
+# Downstream tasks
 
 if __name__ == '__main__':
     parser = LightningArgumentParser()
@@ -162,14 +186,6 @@ if __name__ == '__main__':
     parser.add_argument('--no_augment', action='store_true')
     parser.add_argument('--log_dir', default='lightning_logs', type=str)
     
-    # Downstream task arguments
-    parser.add_argument('--downstream_task', action='store_true', help='Enable downstream task mode')
-    parser.add_argument('--task_type', default='classification', choices=['classification', 'regression', 'multi_label'], help='Type of downstream task')
-    parser.add_argument('--num_classes', default=2, type=int, help='Number of classes for classification tasks')
-    parser.add_argument('--output_dim_downstream', default=1, type=int, help='Output dimension for regression tasks')
-    parser.add_argument('--pretrained_path', default=None, type=str, help='Path to pretrained model checkpoint')
-    parser.add_argument('--freeze_backbone', action='store_true', help='Freeze pretrained backbone during fine-tuning')
-    
     # Model Hyperparameters
     parser.add_argument('--in_node_nf', default=960, type=int, help='Input node feature dimension (ESM embeddings)')
     parser.add_argument('--in_edge_nf', default=11, type=int, help='Input edge feature dimension')
@@ -199,7 +215,24 @@ if __name__ == '__main__':
     parser.add_argument('--cache_size', default=512, type=int, help='Cache size for dataset')
     parser.add_argument('--enable_cache', action='store_true', help='Enable dataset caching')
     parser.add_argument('--preload_cache', action='store_true', help='Preload cache for dataset')
+    
+    # Ligand-specific parameters
+    parser.add_argument('--mode', default='protein', choices=['protein', 'ligand'], type=str, 
+                        help='Training mode: protein for protein pretraining, ligand for ligand pretraining')
+    parser.add_argument('--valid_size', default=0.1, type=float, help='Validation set size for ligand training')
+    parser.add_argument('--use_cosine_similarity', action='store_true', help='Use cosine similarity in NT-Xent loss')
+    
+    # Ligand model-specific parameters (for GCN/GIN)
+    parser.add_argument('--num_layer', default=5, type=int, help='Number of GNN layers for ligand models')
+    parser.add_argument('--emb_dim', default=300, type=int, help='Embedding dimension for ligand models')
+    parser.add_argument('--feat_dim', default=256, type=int, help='Feature dimension for ligand models')
+    parser.add_argument('--drop_ratio', default=0.0, type=float, help='Dropout ratio for ligand models')
+    parser.add_argument('--pool', default='mean', choices=['mean', 'max', 'add'], help='Pooling method for ligand models')
 
     args = parser.parse_args()
 
-    main(args)
+    # Route to appropriate training function based on mode
+    if args.mode == 'ligand':
+        ligand(args)
+    else:
+        main(args)
