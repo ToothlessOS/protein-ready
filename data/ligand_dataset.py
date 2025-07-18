@@ -71,7 +71,7 @@ Outputs:
     2. Indices of the removed atoms (list)
 """
 
-def removeSubgraph(Graph, center, percent=0.2):
+def removeSubgraph(Graph, center, percent=0.25):
     assert percent <= 1
     G = Graph.copy()
     num = int(np.floor(len(G.nodes)*percent))
@@ -100,6 +100,27 @@ class MoleculeDataset(Dataset):
     def __getitem__(self, index):
         mol = Chem.MolFromSmiles(self.smiles_data[index])
         # mol = Chem.AddHs(mol)
+        
+        # Fallback for corrupted data loading
+        if mol is None:
+            print(f"Warning: Failed to parse SMILES at index {index}: {self.smiles_data[index]}")
+            # Try to get a different molecule or return a dummy molecule
+            for fallback_idx in range(len(self.smiles_data)):
+                if fallback_idx != index:
+                    fallback_mol = Chem.MolFromSmiles(self.smiles_data[fallback_idx])
+                    if fallback_mol is not None:
+                        mol = fallback_mol
+                        print(f"Using fallback molecule from index {fallback_idx}")
+                        break
+            
+            # If still None, create a simple dummy molecule (methane)
+            if mol is None:
+                mol = Chem.MolFromSmiles('C')
+                print("Using dummy molecule (methane) as last resort")
+                
+        # Additional safety check
+        if mol is None:
+            raise ValueError(f"Unable to create valid molecule for index {index}")
 
         N = mol.GetNumAtoms()
         M = mol.GetNumBonds()
@@ -190,7 +211,7 @@ class LigandDataset(MoleculeDataset):
     Wrapper around MoleculeDataset to support train/validation splits
     compatible with the data interface pattern.
     """
-    def __init__(self, train=True, data_path=None, valid_size=0.1, random_seed=42, **kwargs):
+    def __init__(self, train=True, data_path=None, valid_size=0.001, random_seed=42, **kwargs):
         # Use provided data_path or fall back to default
         if data_path is None:
             data_path = 'data/chem_dataset/zinc_standard_agent/processed/smiles.csv'

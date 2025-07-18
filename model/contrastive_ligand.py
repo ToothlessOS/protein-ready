@@ -7,8 +7,6 @@ from datetime import datetime
 
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from gnn import GCN, GINet
 

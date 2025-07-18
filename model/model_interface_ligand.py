@@ -39,9 +39,8 @@ class MInterfaceLigand(pl.LightningModule):
         self.configure_loss()
 
     def forward(self, batch_data):
-        # Extract the two views directly from batch
-        view1 = batch_data['view1']
-        view2 = batch_data['view2']
+        # Extract the two views from tuple format (DataBatch, DataBatch)
+        view1, view2 = batch_data
         
         # Forward pass through view1 (expects a data object with .x, .edge_index, .edge_attr, .batch)
         # The GCN/GIN models expect data.x, data.edge_index, data.edge_attr, data.batch
@@ -53,10 +52,6 @@ class MInterfaceLigand(pl.LightningModule):
         return repr1, proj1, repr2, proj2
 
     def training_step(self, batch, batch_idx):
-        # Skip batch if there was a load error
-        if batch.get('load_error', False):
-            return None
-            
         repr1, proj1, repr2, proj2 = self(batch)
         
         # Use projections for contrastive loss (following MolCLR approach)
@@ -67,18 +62,10 @@ class MInterfaceLigand(pl.LightningModule):
         loss = self.loss_function(proj1, proj2)
         
         self.log('loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        # Log learning rate
-        opt = self.optimizers() if hasattr(self, "optimizers") else None
-        if opt is not None:
-            lr = opt.param_groups[0]['lr']
-            self.log('lr', lr, on_step=True, on_epoch=True, prog_bar=True)
+
         return loss
 
     def validation_step(self, batch, batch_idx):
-        # Skip batch if there was a load error
-        if batch.get('load_error', False):
-            return None
-            
         repr1, proj1, repr2, proj2 = self(batch)
         
         # Use projections for contrastive loss (following MolCLR approach)
@@ -90,15 +77,32 @@ class MInterfaceLigand(pl.LightningModule):
         
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         
-        return {'val_loss': loss, 'protein_id': batch.get('protein_id', 'unknown')}
+        # Try to get protein_id from first DataBatch if it exists
+        protein_id = 'unknown'
+        if hasattr(batch[0], 'protein_id'):
+            protein_id = batch[0].protein_id
+        
+        return {'val_loss': loss, 'protein_id': protein_id}
 
     def test_step(self, batch, batch_idx):
         # Here we just reuse the validation_step for testing
         return self.validation_step(batch, batch_idx)
 
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        """Log learning rate at the end of each training batch."""
+        # Get current learning rate from optimizer
+        if hasattr(self, "trainer") and hasattr(self.trainer, "optimizers") and self.trainer.optimizers:
+            optimizer = self.trainer.optimizers[0]
+            current_lr = optimizer.param_groups[0]['lr']
+            self.log('lr', current_lr, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+
     def on_validation_epoch_end(self):
-        # Make the Progress Bar leave there
-        self.print('')
+        """Log learning rate at the end of each validation epoch."""
+        if hasattr(self, "trainer") and hasattr(self.trainer, "optimizers") and self.trainer.optimizers:
+            optimizer = self.trainer.optimizers[0]
+            current_lr = optimizer.param_groups[0]['lr']
+            self.log('val_lr', current_lr, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            print('')
 
     def configure_optimizers(self):
         if hasattr(self.hparams, 'weight_decay'):
@@ -115,6 +119,15 @@ class MInterfaceLigand(pl.LightningModule):
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer, mode='min', factor=self.hparams.lr_decay_ratio, patience=self.hparams.lr_decay_patience, min_lr=self.hparams.lr_decay_min_lr
                 )
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {
+                        "scheduler": scheduler,
+                        "monitor": "val_loss",
+                        "interval": "epoch",
+                        "frequency": 1,
+                    },
+                }
             elif self.hparams.lr_scheduler == 'cosine':
                 warmup_epochs = self.hparams.lr_cosine_warmup_epochs
                 max_epochs = self.hparams.max_epochs
@@ -123,8 +136,9 @@ class MInterfaceLigand(pl.LightningModule):
 
                 def combined_lr_lambda(epoch):
                     if epoch < warmup_epochs:
-                        # Linear warm-up phase
-                        return epoch / warmup_epochs
+                        # Linear warm-up phase, avoid zero lr
+                        min_lr_factor = 1e-6
+                        return max(epoch / warmup_epochs, min_lr_factor)
                     else:
                         # After warm-up: combine decay with cyclic behavior
                         progress = (epoch - warmup_epochs) / (max_epochs - warmup_epochs)
@@ -139,9 +153,16 @@ class MInterfaceLigand(pl.LightningModule):
                         return decay_factor * cyclic_factor
             
                 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, combined_lr_lambda)
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {
+                        "scheduler": scheduler,
+                        "interval": "epoch",
+                        "frequency": 1,
+                    },
+                }
             else:
                 raise ValueError('Invalid lr_scheduler type!')
-            return [optimizer], [scheduler]
 
     def configure_loss(self):
         loss = self.hparams.loss.lower()
@@ -206,3 +227,10 @@ class MInterfaceLigand(pl.LightningModule):
                 args1[arg] = getattr(self.hparams, arg)
         args1.update(other_args)
         return Model(**args1)
+
+    def print_current_lr(self):
+        """Print the current learning rate from the optimizer."""
+        if hasattr(self, "trainer") and hasattr(self.trainer, "optimizers") and self.trainer.optimizers:
+            optimizer = self.trainer.optimizers[0]
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Current learning rate: {current_lr}")

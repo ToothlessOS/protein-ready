@@ -80,7 +80,7 @@ def main(args):
     trainer = Trainer(
         max_epochs=getattr(args, 'max_epochs', 100),
         accelerator=getattr(args, 'accelerator', 'auto'),
-        devices=getattr(args, 'devices', 'auto'),
+        devices=getattr(args, 'devices', 'cuda'),
         callbacks=callbacks,
         logger=getattr(args, 'logger', True),
         check_val_every_n_epoch=getattr(args, 'check_val_every_n_epoch', 1),
@@ -109,8 +109,8 @@ def ligand(args):
         args.model_name = 'gcn'  # Default to GCN for ligand models
     if not hasattr(args, 'loss') or args.loss == 'contrastive':
         args.loss = 'nt_xent'  # Use NT-Xent loss for ligand contrastive learning
-    if not hasattr(args, 'data_path'):
-        args.data_path = 'dataset/MolCLR_data/data/'  # Default ligand data path
+    if not hasattr(args, 'data_path') or args.data_path == 'dataset/protein_g/':
+        args.data_path = 'dataset/MolCLR_data/data/pubchem-10m-clean.txt'  # Default ligand data path
     
     # Load model path for resuming training if specified
     load_path = load_model_path_by_args(args)
@@ -165,6 +165,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr_scheduler', choices=['reduce-on-plateau', 'cosine'], type=str, default='cosine')
     parser.add_argument('--lr_decay_ratio', default=0.95, type=float)
     parser.add_argument('--lr_decay_patience', default=4, type=int)
+    parser.add_argument('--lr_decay_min_lr', default=1e-6, type=float)
     parser.add_argument('--lr_cosine_warmup_epochs', default=10, type=int)
     parser.add_argument('--lr_cosine_cycle_length', default=20, type=float)
     parser.add_argument('--lr_cosine_decay_ratio', default=0.99, type=float)
