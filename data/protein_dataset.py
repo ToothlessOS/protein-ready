@@ -216,6 +216,10 @@ class ProteinDataset(Dataset):
                 'view2': None
             }
         
+        # Check if graph is large enough for subgraph sampling
+        num_nodes = protein_graph['node_features'].shape[0]
+        can_sample_subgraph = num_nodes >= self.min_nodes
+        
         # Generate two contrastive views with new sampling probabilities
         a = getattr(self, 'complete_graph_percent', 0)  # Set this attribute when initializing if needed
         complete_prob = a / 100.0
@@ -223,11 +227,11 @@ class ProteinDataset(Dataset):
         dist_prob = seq_prob  # Both are equal
 
         rand_val = random.random()
-        if rand_val < complete_prob:
-            # Use complete graph for both views
+        if not can_sample_subgraph or rand_val < complete_prob:
+            # Use complete graph for both views (forced if graph is too small)
             view1 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
             view2 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
-            sampling_strategy = 'complete'
+            sampling_strategy = 'complete' if can_sample_subgraph else 'complete_forced'
         elif rand_val < complete_prob + seq_prob:
             # Sequential sampling for both views
             view1 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)

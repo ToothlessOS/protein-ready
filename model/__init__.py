@@ -13,3 +13,4 @@
 # limitations under the License.
 
 from .model_interface import MInterface
+from .model_interface_ligand import MInterfaceLigand

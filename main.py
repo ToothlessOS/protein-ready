@@ -27,11 +27,11 @@ from pytorch_lightning import Trainer
 import pytorch_lightning.callbacks as plc
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.cli import LightningArgumentParser
+from pytorch_lightning.strategies import DDPStrategy
 
-from model import MInterface
-from data import DInterface
+from model import MInterface, MInterfaceLigand
+from data import DInterface, DInterfaceLigand
 from utils import load_model_path_by_args
-
 
 def load_callbacks():
     callbacks = []
@@ -60,6 +60,8 @@ def load_callbacks():
 
 def main(args):
     pl.seed_everything(args.seed)
+        
+    # Original pretraining mode
     load_path = load_model_path_by_args(args)
     data_module = DInterface(**vars(args))
 
@@ -78,6 +80,58 @@ def main(args):
     trainer = Trainer(
         max_epochs=getattr(args, 'max_epochs', 100),
         accelerator=getattr(args, 'accelerator', 'auto'),
+        devices=getattr(args, 'devices', 'cuda'),
+        callbacks=callbacks,
+        logger=getattr(args, 'logger', True),
+        check_val_every_n_epoch=getattr(args, 'check_val_every_n_epoch', 1),
+        val_check_interval=getattr(args, 'val_check_interval', 1.0),
+        num_sanity_val_steps=getattr(args, 'num_sanity_val_steps', 2),
+        log_every_n_steps=getattr(args, 'log_every_n_steps', 1),
+        precision=getattr(args, 'precision', '32-true'),
+        fast_dev_run=getattr(args, 'fast_dev_run', False),
+        limit_train_batches=getattr(args, 'limit_train_batches', 1.0),
+        limit_val_batches=getattr(args, 'limit_val_batches', 1.0),
+        limit_test_batches=getattr(args, 'limit_test_batches', 1.0),
+        strategy=DDPStrategy(find_unused_parameters=True)
+    )
+    
+    ckpt_path = getattr(args, 'ckpt_path', None)
+    trainer.fit(model, data_module, ckpt_path=ckpt_path)
+
+# Pretrain ligand model
+def ligand(args):
+    pl.seed_everything(args.seed)
+    
+    # Set ligand-specific defaults if not already set
+    if not hasattr(args, 'dataset') or args.dataset == 'protein_dataset':
+        args.dataset = 'ligand_dataset'
+    if not hasattr(args, 'model_name') or args.model_name == 'contrastive':
+        args.model_name = 'gcn'  # Default to GCN for ligand models
+    if not hasattr(args, 'loss') or args.loss == 'contrastive':
+        args.loss = 'nt_xent'  # Use NT-Xent loss for ligand contrastive learning
+    if not hasattr(args, 'data_path') or args.data_path == 'dataset/protein_g/':
+        args.data_path = 'dataset/MolCLR_data/data/pubchem-10m-clean.txt'  # Default ligand data path
+    
+    # Load model path for resuming training if specified
+    load_path = load_model_path_by_args(args)
+    
+    # Initialize ligand data module
+    data_module = DInterfaceLigand(**vars(args))
+    
+    # Initialize ligand model
+    if load_path is None:
+        model = MInterfaceLigand(**vars(args))
+    else:
+        model = MInterfaceLigand(**vars(args))
+        args.ckpt_path = load_path
+    
+    # Load callbacks (same as main function)
+    callbacks = load_callbacks()
+    
+    # Initialize trainer with same configuration as main function
+    trainer = Trainer(
+        max_epochs=getattr(args, 'max_epochs', 100),
+        accelerator=getattr(args, 'accelerator', 'auto'),
         devices=getattr(args, 'devices', 'auto'),
         callbacks=callbacks,
         logger=getattr(args, 'logger', True),
@@ -90,11 +144,14 @@ def main(args):
         limit_train_batches=getattr(args, 'limit_train_batches', 1.0),
         limit_val_batches=getattr(args, 'limit_val_batches', 1.0),
         limit_test_batches=getattr(args, 'limit_test_batches', 1.0),
+        strategy=DDPStrategy(find_unused_parameters=True)
     )
     
+    # Start training
     ckpt_path = getattr(args, 'ckpt_path', None)
     trainer.fit(model, data_module, ckpt_path=ckpt_path)
 
+# Downstream tasks
 
 if __name__ == '__main__':
     parser = LightningArgumentParser()
@@ -108,6 +165,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr_scheduler', choices=['reduce-on-plateau', 'cosine'], type=str, default='cosine')
     parser.add_argument('--lr_decay_ratio', default=0.95, type=float)
     parser.add_argument('--lr_decay_patience', default=4, type=int)
+    parser.add_argument('--lr_decay_min_lr', default=1e-6, type=float)
     parser.add_argument('--lr_cosine_warmup_epochs', default=10, type=int)
     parser.add_argument('--lr_cosine_cycle_length', default=20, type=float)
     parser.add_argument('--lr_cosine_decay_ratio', default=0.99, type=float)
@@ -122,7 +180,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', default='protein_dataset', type=str)
     parser.add_argument('--data_path', default='dataset/protein_g/', type=str)
     parser.add_argument('--complete_graph_percent', default=0, type=int, help='Percentage of complete graphs in the dataset') # Different from GearNet
-    parser.add_argument('--test_percent', default=0.1, type=float, help='Percentage of data used for testing')
+    parser.add_argument('--test_percent', default=0.01, type=float, help='Percentage of data used for testing')
     parser.add_argument('--model_name', default='contrastive', type=str)
     parser.add_argument('--loss', default='contrastive', type=str)
     parser.add_argument('--weight_decay', default=1e-5, type=float)
@@ -158,7 +216,24 @@ if __name__ == '__main__':
     parser.add_argument('--cache_size', default=512, type=int, help='Cache size for dataset')
     parser.add_argument('--enable_cache', action='store_true', help='Enable dataset caching')
     parser.add_argument('--preload_cache', action='store_true', help='Preload cache for dataset')
+    
+    # Ligand-specific parameters
+    parser.add_argument('--mode', default='protein', choices=['protein', 'ligand'], type=str, 
+                        help='Training mode: protein for protein pretraining, ligand for ligand pretraining')
+    parser.add_argument('--valid_size', default=0.1, type=float, help='Validation set size for ligand training')
+    parser.add_argument('--use_cosine_similarity', action='store_true', help='Use cosine similarity in NT-Xent loss')
+    
+    # Ligand model-specific parameters (for GCN/GIN)
+    parser.add_argument('--num_layer', default=5, type=int, help='Number of GNN layers for ligand models')
+    parser.add_argument('--emb_dim', default=300, type=int, help='Embedding dimension for ligand models')
+    parser.add_argument('--feat_dim', default=256, type=int, help='Feature dimension for ligand models')
+    parser.add_argument('--drop_ratio', default=0.0, type=float, help='Dropout ratio for ligand models')
+    parser.add_argument('--pool', default='mean', choices=['mean', 'max', 'add'], help='Pooling method for ligand models')
 
     args = parser.parse_args()
 
-    main(args)
+    # Route to appropriate training function based on mode
+    if args.mode == 'ligand':
+        ligand(args)
+    else:
+        main(args)

@@ -13,4 +13,5 @@
 # limitations under the License.
 
 from .data_interface import DInterface
+from .data_interface_ligand import DInterfaceLigand
 from .graph_collate import graph_collate_fn, collate_graph_data, unbatch_graph_data
