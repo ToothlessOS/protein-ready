@@ -5,27 +5,40 @@ import glob
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from tools.subgraph_sampler import ProteinSubgraphSampler
+from .pdb_processor import PDBProcessor
+from .cache_manager import CacheManager
 import random
 import threading
 from collections import OrderedDict
 
 class ProteinDataset(Dataset):
-    def __init__(self, train=True, data_path=None, transform=None, **kwargs):
+    def __init__(self, train=True, data_path=None, pdb_path=None, cache_path=None, transform=None, **kwargs):
         self.train = train
         self.data_path = data_path
+        self.pdb_path = pdb_path or "dataset/rcsb/human"  # Default PDB path
+        self.cache_path = cache_path or "dataset/protein_cache"  # Default cache path
         self.transform = transform
+        
+        # New parameters for on-the-fly processing
+        self.enable_pdb_processing = kwargs.get('enable_pdb_processing', True)
+        self.force_pdb_processing = kwargs.get('force_pdb_processing', False)  # Force PDB processing even if .pt files exist
         
         # Subgraph sampling parameters
         self.min_nodes = kwargs.get('min_nodes', 10)
         self.max_nodes = kwargs.get('max_nodes', 100)
 
-        # Initialize the subgraph sampler
+        # Initialize components
         self.subgraph_sampler = ProteinSubgraphSampler(
             min_nodes=self.min_nodes,
             max_nodes=self.max_nodes
         )
-
-        # Index the protein dataset
+        
+        # Initialize PDB processor and cache manager
+        self.pdb_processor = None  # Lazy initialization
+        self.cache_manager = CacheManager(self.cache_path)
+        
+        # Determine data source and index files
+        self._determine_data_source()
         self.file_paths = self._get_file_paths()
         self.protein_ids = self._generate_protein_ids()
         
@@ -45,18 +58,102 @@ class ProteinDataset(Dataset):
         # Worker-specific settings
         self._worker_id = None
         self._is_main_process = True
+        
+        # Statistics
+        self._pdb_processed_count = 0
+        self._cache_hit_count = 0
+        self._pt_file_count = 0
+        self._failed_files = set()  # Track files that failed to process
+        self._valid_files = None  # Cache of validated files
+        
+        # Error handling options
+        self.skip_invalid_files = kwargs.get('skip_invalid_files', True)
+        self.validate_on_init = kwargs.get('validate_on_init', False)  # Pre-validate files during init
+        self.max_retry_attempts = kwargs.get('max_retry_attempts', 1)
+        
+        # ESM-C configuration
+        self.esm_use_cpu = kwargs.get('esm_use_cpu', False)
+        if self.esm_use_cpu:
+            os.environ['ESM_USE_CPU'] = 'true'
+            print("Dataset: Configured ESM-C to use CPU only")
+        
+        # Pre-validate files if requested
+        if self.validate_on_init and self.use_pdb_files:
+            self._validate_pdb_files()
+    
+    def __getstate__(self):
+        """Custom pickling - exclude locks and worker-specific state."""
+        state = self.__dict__.copy()
+        # Remove unpickleable entries
+        del state['_cache_lock']
+        # Reset worker-specific state for new process
+        state['_worker_id'] = None
+        state['_is_main_process'] = False  # Workers are not main process
+        return state
+    
+    def __setstate__(self, state):
+        """Custom unpickling - restore state and create new lock."""
+        self.__dict__.update(state)
+        # Create new lock in worker process
+        self._cache_lock = threading.Lock()
+        # Worker will determine its own ID later
+
+    def _determine_data_source(self):
+        """Determine whether to use preprocessed .pt files or PDB files."""
+        self.use_pdb_files = False
+        self.data_source_type = "unknown"
+        
+        # Check if we should force PDB processing
+        if self.force_pdb_processing:
+            if os.path.exists(self.pdb_path):
+                self.use_pdb_files = True
+                self.data_source_type = "pdb_forced"
+                print(f"Dataset: Forced PDB processing from {self.pdb_path}")
+            else:
+                raise ValueError(f"PDB path not found: {self.pdb_path}")
+        
+        # Check for preprocessed .pt files first (backward compatibility)
+        elif self.data_path and os.path.exists(self.data_path):
+            pt_files = glob.glob(os.path.join(self.data_path, "*.pt"))
+            if pt_files:
+                self.use_pdb_files = False
+                self.data_source_type = "preprocessed"
+                print(f"Dataset: Using preprocessed .pt files from {self.data_path}")
+                return
+        
+        # Fall back to PDB files if enabled
+        if self.enable_pdb_processing and os.path.exists(self.pdb_path):
+            pdb_files = glob.glob(os.path.join(self.pdb_path, "*.pdb"))
+            if pdb_files:
+                self.use_pdb_files = True
+                self.data_source_type = "pdb_fallback"
+                print(f"Dataset: Using PDB files from {self.pdb_path} (no preprocessed files found)")
+            else:
+                raise ValueError(f"No PDB files found in {self.pdb_path}")
+        else:
+            if not self.enable_pdb_processing:
+                raise ValueError(f"No preprocessed files found in {self.data_path} and PDB processing is disabled")
+            else:
+                raise ValueError(f"No data files found in {self.data_path} or {self.pdb_path}")
 
     def _get_file_paths(self):
-        """Get all protein graph file paths without loading them"""
+        """Get all protein file paths based on determined data source."""
         file_paths = []
-            
-        if self.data_path and os.path.exists(self.data_path):
-            # Support multiple file formats
-            pattern = '*.pt'
-            file_paths.extend(glob.glob(os.path.join(self.data_path, pattern)))
+        
+        if self.use_pdb_files:
+            # Use PDB files
+            if os.path.exists(self.pdb_path):
+                pattern = '*.pdb'
+                file_paths.extend(glob.glob(os.path.join(self.pdb_path, pattern)))
+        else:
+            # Use preprocessed .pt files
+            if self.data_path and os.path.exists(self.data_path):
+                pattern = '*.pt'
+                file_paths.extend(glob.glob(os.path.join(self.data_path, pattern)))
             
         # Sort for consistent ordering
         file_paths.sort()
+        print(f"Dataset: Found {len(file_paths)} files ({self.data_source_type})")
         return file_paths
     
     def _generate_protein_ids(self):
@@ -64,7 +161,19 @@ class ProteinDataset(Dataset):
         protein_ids = []
         for file_path in self.file_paths:
             filename = Path(file_path).stem  # Get filename without extension
-            protein_ids.append(filename)
+            
+            # Handle different filename patterns
+            if self.use_pdb_files:
+                # For PDB files, use the filename directly
+                protein_ids.append(filename)
+            else:
+                # For .pt files, remove 'pytorch_graph_' prefix if present
+                if filename.startswith('pytorch_graph_'):
+                    protein_id = filename[len('pytorch_graph_'):]
+                else:
+                    protein_id = filename
+                protein_ids.append(protein_id)
+                
         return protein_ids
     
     def _create_data_splits(self):
@@ -83,6 +192,81 @@ class ProteinDataset(Dataset):
         
         # Regenerate protein IDs after split
         self.protein_ids = self._generate_protein_ids()
+    
+    def _validate_pdb_files(self):
+        """Pre-validate PDB files to identify problematic ones."""
+        if not self.use_pdb_files:
+            return
+        
+        print(f"Dataset: Pre-validating {len(self.file_paths)} PDB files...")
+        valid_files = []
+        failed_files = []
+        
+        for i, file_path in enumerate(self.file_paths):
+            if i % 50 == 0:
+                print(f"Dataset: Validation progress: {i}/{len(self.file_paths)}")
+            
+            try:
+                if self._is_pdb_file_valid(file_path):
+                    valid_files.append(file_path)
+                else:
+                    failed_files.append(file_path)
+                    self._failed_files.add(file_path)
+            except Exception as e:
+                print(f"Dataset: Validation failed for {file_path}: {e}")
+                failed_files.append(file_path)
+                self._failed_files.add(file_path)
+        
+        print(f"Dataset: Validation complete - Valid: {len(valid_files)}, Failed: {len(failed_files)}")
+        
+        if failed_files:
+            print(f"Dataset: Failed files: {[Path(f).name for f in failed_files[:10]]}" + 
+                  (f" (and {len(failed_files)-10} more)" if len(failed_files) > 10 else ""))
+        
+        # Update file paths to only include valid files
+        if self.skip_invalid_files:
+            self.file_paths = valid_files
+            self.protein_ids = self._generate_protein_ids()
+            print(f"Dataset: Using {len(self.file_paths)} valid files after filtering")
+    
+    def _is_pdb_file_valid(self, pdb_file_path):
+        """Quick validation check for PDB file without full processing."""
+        try:
+            from Bio.PDB import PDBParser
+            import numpy as np
+            
+            parser = PDBParser(QUIET=True)
+            structure = parser.get_structure("test", pdb_file_path)
+            
+            # Check if we have any valid chains with coordinates
+            valid_residues = 0
+            for model in structure:
+                for chain in model:
+                    for residue in chain:
+                        if residue.has_id("CA"):
+                            ca_atom = residue["CA"]
+                            coords = ca_atom.get_coord()
+                            
+                            # Check for NaN or infinite coordinates
+                            if np.any(np.isnan(coords)) or np.any(np.isinf(coords)):
+                                print(f"Dataset: Invalid coordinates in {pdb_file_path}: {coords}")
+                                return False
+                            
+                            valid_residues += 1
+                            
+                            # Early exit if we have enough valid residues
+                            if valid_residues >= self.min_nodes:
+                                return True
+            
+            if valid_residues < self.min_nodes:
+                print(f"Dataset: Too few valid residues in {pdb_file_path}: {valid_residues} < {self.min_nodes}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Dataset: Validation error for {pdb_file_path}: {e}")
+            return False
 
     def _get_worker_info(self):
         """Get current worker information for multiprocessing awareness"""
@@ -97,6 +281,12 @@ class ProteinDataset(Dataset):
             return worker_info
         except:
             return None
+
+    def _get_pdb_processor(self):
+        """Get PDB processor with lazy initialization."""
+        if self.pdb_processor is None:
+            self.pdb_processor = PDBProcessor()
+        return self.pdb_processor
 
     def _load_single_graph(self, file_path):
         """Load a single protein graph with improved thread-safe caching"""
@@ -125,7 +315,19 @@ class ProteinDataset(Dataset):
         return graph_data
     
     def _load_from_disk(self, file_path):
-        """Load graph data from disk without caching"""
+        """Load graph data from disk or process PDB file on-demand."""
+        try:
+            if self.use_pdb_files:
+                return self._load_from_pdb(file_path)
+            else:
+                return self._load_from_pt_file(file_path)
+                
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+            return None
+    
+    def _load_from_pt_file(self, file_path):
+        """Load graph data from preprocessed .pt file."""
         try:
             graph_data = torch.load(file_path, map_location='cpu')
             
@@ -140,10 +342,39 @@ class ProteinDataset(Dataset):
                 num_edges = graph_data['edge_index'].shape[1]
                 graph_data['edge_attr'] = torch.ones((num_edges, 1))
             
+            self._pt_file_count += 1
             return graph_data
             
         except Exception as e:
-            print(f"Error loading {file_path}: {e}")
+            print(f"Error loading .pt file {file_path}: {e}")
+            return None
+    
+    def _load_from_pdb(self, pdb_file_path):
+        """Load graph data from PDB file with persistent caching."""
+        try:
+            # Check persistent cache first
+            if self.cache_manager.exists(pdb_file_path):
+                graph_data = self.cache_manager.load(pdb_file_path)
+                if graph_data is not None:
+                    self._cache_hit_count += 1
+                    return graph_data
+            
+            # Process PDB file on-the-fly
+            print(f"Processing PDB file on-the-fly: {pdb_file_path}")
+            processor = self._get_pdb_processor()
+            graph_data = processor.process_pdb_file(pdb_file_path)
+            
+            if graph_data is not None:
+                # Save to persistent cache
+                self.cache_manager.save(pdb_file_path, graph_data)
+                self._pdb_processed_count += 1
+                return graph_data
+            else:
+                print(f"Failed to process PDB file: {pdb_file_path}")
+                return None
+                
+        except Exception as e:
+            print(f"Error processing PDB file {pdb_file_path}: {e}")
             return None
         
     def _add_to_cache(self, file_path, graph_data):
@@ -164,13 +395,50 @@ class ProteinDataset(Dataset):
     def get_cache_info(self):
         """Get cache statistics"""
         with self._cache_lock:
-            return {
+            basic_info = {
                 'cache_size': len(self._cache),
                 'max_cache_size': self.cache_size,
                 'worker_id': self._worker_id,
                 'is_main_process': self._is_main_process,
-                'cache_enabled': self.enable_cache
+                'cache_enabled': self.enable_cache,
+                'data_source_type': self.data_source_type,
+                'use_pdb_files': self.use_pdb_files,
+                'pdb_processed_count': self._pdb_processed_count,
+                'cache_hit_count': self._cache_hit_count,
+                'pt_file_count': self._pt_file_count
             }
+            
+            # Add persistent cache info if using PDB files
+            if self.use_pdb_files:
+                persistent_cache_info = self.cache_manager.get_cache_stats()
+                basic_info.update({
+                    'persistent_cache': persistent_cache_info
+                })
+            
+            return basic_info
+    
+    def get_processing_stats(self):
+        """Get detailed processing statistics."""
+        return {
+            'data_source': self.data_source_type,
+            'total_files': len(self.file_paths),
+            'failed_files_count': len(self._failed_files),
+            'failed_files': [Path(f).name for f in list(self._failed_files)[:10]],  # Show first 10
+            'pdb_processed_on_fly': self._pdb_processed_count,
+            'persistent_cache_hits': self._cache_hit_count,
+            'pt_files_loaded': self._pt_file_count,
+            'success_rate': (len(self.file_paths) - len(self._failed_files)) / len(self.file_paths) if len(self.file_paths) > 0 else 0,
+            'cache_manager_stats': self.cache_manager.get_cache_stats() if self.use_pdb_files else None
+        }
+    
+    def get_failed_files(self):
+        """Get list of files that failed to process."""
+        return list(self._failed_files)
+    
+    def clear_failed_files(self):
+        """Clear the list of failed files (useful for retrying)."""
+        self._failed_files.clear()
+        print("Dataset: Cleared failed files list")
 
     def warm_cache(self, num_samples=None):
         """Pre-load a subset of the dataset into cache"""
@@ -197,73 +465,191 @@ class ProteinDataset(Dataset):
         return len(self.file_paths)
 
     def __getitem__(self, idx):
-        """Load protein graph on-demand and generate two contrastive views"""
-        file_path = self.file_paths[idx]
-        protein_id = self.protein_ids[idx]
-            
-        # Load graph data
-        protein_graph = self._load_single_graph(file_path)
-            
-        if protein_graph is None:
-            # Return dummy data if loading failed
-            return {
-                'protein_graph': None,
-                'protein_id': protein_id,
-                'idx': idx,
-                'file_path': file_path,
-                'load_error': True,
-                'view1': None,
-                'view2': None
-            }
+        """Load protein graph on-demand and generate two contrastive views with robust error handling."""
+        max_attempts = len(self.file_paths)  # Maximum attempts to find a valid sample
+        attempt = 0
         
-        # Check if graph is large enough for subgraph sampling
-        num_nodes = protein_graph['node_features'].shape[0]
-        can_sample_subgraph = num_nodes >= self.min_nodes
-        
-        # Generate two contrastive views with new sampling probabilities
-        a = getattr(self, 'complete_graph_percent', 0)  # Set this attribute when initializing if needed
-        complete_prob = a / 100.0
-        seq_prob = (50 - 0.5 * a) / 100.0
-        dist_prob = seq_prob  # Both are equal
-
-        rand_val = random.random()
-        if not can_sample_subgraph or rand_val < complete_prob:
-            # Use complete graph for both views (forced if graph is too small)
-            view1 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
-            view2 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
-            sampling_strategy = 'complete' if can_sample_subgraph else 'complete_forced'
-        elif rand_val < complete_prob + seq_prob:
-            # Sequential sampling for both views
-            view1 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)
-            view2 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)
-            sampling_strategy = 'sequential'
-        else:
-            # Distance-based sampling for both views
-            view1 = self.subgraph_sampler.sample_distance_subgraph(protein_graph)
-            view2 = self.subgraph_sampler.sample_distance_subgraph(protein_graph)
-            sampling_strategy = 'distance'
-
-        # Randomly choose whether to apply masking (50/50 chance)
-        apply_masking = random.random() < 0.5
-
-        # Apply same noise transformation to both views
-        if apply_masking:
-            view1 = self.subgraph_sampler.apply_noise(view1, "random_edge_masking", edge_mask_prob=0.15)
-            view2 = self.subgraph_sampler.apply_noise(view2, "random_edge_masking", edge_mask_prob=0.15)
-            noise_applied = 'masking'
-        else:
-            view1 = self.subgraph_sampler.apply_noise(view1, "identity")
-            view2 = self.subgraph_sampler.apply_noise(view2, "identity")
-            noise_applied = 'identity'
+        while attempt < max_attempts:
+            try:
+                # Get current file (with wraparound if we've tried many times)
+                current_idx = (idx + attempt) % len(self.file_paths)
+                file_path = self.file_paths[current_idx]
+                protein_id = self.protein_ids[current_idx]
                 
+                # Skip files that we know have failed before
+                if self.skip_invalid_files and file_path in self._failed_files:
+                    attempt += 1
+                    continue
+                
+                # Load graph data
+                protein_graph = self._load_single_graph(file_path)
+                
+                if protein_graph is None:
+                    # Mark this file as failed and try next
+                    self._failed_files.add(file_path)
+                    print(f"Dataset: Marking {Path(file_path).name} as failed, trying next file...")
+                    attempt += 1
+                    continue
+                
+                # Validate graph data
+                if not self._validate_graph_data(protein_graph):
+                    self._failed_files.add(file_path)
+                    print(f"Dataset: Graph validation failed for {Path(file_path).name}, trying next file...")
+                    attempt += 1
+                    continue
+                
+                # Check if graph is large enough for subgraph sampling
+                num_nodes = protein_graph['node_features'].shape[0]
+                if num_nodes < self.min_nodes:
+                    self._failed_files.add(file_path)
+                    print(f"Dataset: Graph too small for {Path(file_path).name} ({num_nodes} < {self.min_nodes}), trying next file...")
+                    attempt += 1
+                    continue
+                
+                # Generate two contrastive views
+                view1, view2, sampling_strategy, noise_applied = self._generate_contrastive_views(protein_graph)
+                
+                # Validate views
+                if view1 is None or view2 is None:
+                    print(f"Dataset: Failed to generate views for {Path(file_path).name}, trying next file...")
+                    attempt += 1
+                    continue
+                
+                # Successfully created a valid sample
+                return {
+                    'protein_graph': protein_graph,
+                    'protein_id': protein_id,
+                    'idx': current_idx,
+                    'file_path': file_path,
+                    'load_error': False,
+                    'view1': view1,
+                    'view2': view2,
+                    'sampling_strategy': sampling_strategy,
+                    'noise_applied': noise_applied,
+                    'attempts_needed': attempt + 1
+                }
+                
+            except Exception as e:
+                print(f"Dataset: Unexpected error processing {self.file_paths[(idx + attempt) % len(self.file_paths)]}: {e}")
+                attempt += 1
+                continue
+        
+        # If we get here, we couldn't find any valid sample after many attempts
+        print(f"Dataset: Could not find valid sample after {max_attempts} attempts starting from idx {idx}")
+        
+        # Return a dummy sample to prevent DataLoader from crashing
+        return self._create_dummy_sample(idx)
+    
+    def _validate_graph_data(self, graph_data):
+        """Validate that graph data is complete and has no NaN/infinite values."""
+        try:
+            if graph_data is None:
+                return False
+            
+            required_keys = ['node_features', 'edge_index', 'node_pos']
+            if not all(key in graph_data for key in required_keys):
+                return False
+            
+            # Check for NaN or infinite values
+            import torch
+            
+            # Check node features
+            if torch.any(torch.isnan(graph_data['node_features'])) or torch.any(torch.isinf(graph_data['node_features'])):
+                print("Dataset: NaN/Inf found in node_features")
+                return False
+            
+            # Check node positions
+            if torch.any(torch.isnan(graph_data['node_pos'])) or torch.any(torch.isinf(graph_data['node_pos'])):
+                print("Dataset: NaN/Inf found in node_pos")
+                return False
+            
+            # Check edge attributes if present
+            if 'edge_attr' in graph_data and graph_data['edge_attr'] is not None:
+                if torch.any(torch.isnan(graph_data['edge_attr'])) or torch.any(torch.isinf(graph_data['edge_attr'])):
+                    print("Dataset: NaN/Inf found in edge_attr")
+                    return False
+            
+            # Check tensor shapes are consistent
+            num_nodes = graph_data['node_features'].shape[0]
+            if graph_data['node_pos'].shape[0] != num_nodes:
+                print(f"Dataset: Inconsistent shapes - features: {graph_data['node_features'].shape}, pos: {graph_data['node_pos'].shape}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Dataset: Error validating graph data: {e}")
+            return False
+    
+    def _generate_contrastive_views(self, protein_graph):
+        """Generate two contrastive views with error handling."""
+        try:
+            num_nodes = protein_graph['node_features'].shape[0]
+            can_sample_subgraph = num_nodes >= self.min_nodes
+            
+            # Generate two contrastive views with sampling probabilities
+            a = getattr(self, 'complete_graph_percent', 0)
+            complete_prob = a / 100.0
+            seq_prob = (50 - 0.5 * a) / 100.0
+            dist_prob = seq_prob
+            
+            rand_val = random.random()
+            
+            if not can_sample_subgraph or rand_val < complete_prob:
+                # Use complete graph for both views
+                view1 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
+                view2 = self.subgraph_sampler.apply_noise(protein_graph, "identity")
+                sampling_strategy = 'complete' if can_sample_subgraph else 'complete_forced'
+            elif rand_val < complete_prob + seq_prob:
+                # Sequential sampling for both views
+                view1 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)
+                view2 = self.subgraph_sampler.sample_sequential_subgraph(protein_graph)
+                sampling_strategy = 'sequential'
+            else:
+                # Distance-based sampling for both views
+                view1 = self.subgraph_sampler.sample_distance_subgraph(protein_graph)
+                view2 = self.subgraph_sampler.sample_distance_subgraph(protein_graph)
+                sampling_strategy = 'distance'
+            
+            # Validate views before applying noise
+            if not self._validate_graph_data(view1) or not self._validate_graph_data(view2):
+                print("Dataset: Invalid views generated during subgraph sampling")
+                return None, None, sampling_strategy, 'none'
+            
+            # Apply noise transformations
+            apply_masking = random.random() < 0.5
+            
+            if apply_masking:
+                view1 = self.subgraph_sampler.apply_noise(view1, "random_edge_masking", edge_mask_prob=0.15)
+                view2 = self.subgraph_sampler.apply_noise(view2, "random_edge_masking", edge_mask_prob=0.15)
+                noise_applied = 'masking'
+            else:
+                view1 = self.subgraph_sampler.apply_noise(view1, "identity")
+                view2 = self.subgraph_sampler.apply_noise(view2, "identity")
+                noise_applied = 'identity'
+            
+            # Final validation of views
+            if not self._validate_graph_data(view1) or not self._validate_graph_data(view2):
+                print("Dataset: Invalid views after noise application")
+                return None, None, sampling_strategy, noise_applied
+            
+            return view1, view2, sampling_strategy, noise_applied
+            
+        except Exception as e:
+            print(f"Dataset: Error generating contrastive views: {e}")
+            return None, None, 'error', 'none'
+    
+    def _create_dummy_sample(self, idx):
+        """Create a dummy sample when all else fails to prevent DataLoader crashes."""
         return {
-            'protein_graph': protein_graph,
-            'protein_id': protein_id,
+            'protein_graph': None,
+            'protein_id': f'dummy_{idx}',
             'idx': idx,
-            'file_path': file_path,
-            'load_error': False,
-            'view1': view1,
-            'view2': view2,
-            'sampling_strategy': sampling_strategy,
-            'noise_applied': noise_applied
+            'file_path': 'dummy',
+            'load_error': True,
+            'view1': None,
+            'view2': None,
+            'sampling_strategy': 'dummy',
+            'noise_applied': 'none',
+            'attempts_needed': -1
         }

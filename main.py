@@ -28,10 +28,18 @@ import pytorch_lightning.callbacks as plc
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.cli import LightningArgumentParser
 from pytorch_lightning.strategies import DDPStrategy
+import torch.multiprocessing as mp
 
 from model import MInterface, MInterfaceLigand
 from data import DInterface, DInterfaceLigand
 from utils import load_model_path_by_args
+
+# Set multiprocessing start method for CUDA compatibility
+try:
+    mp.set_start_method('spawn', force=True)
+    print("Multiprocessing: Set start method to 'spawn' for CUDA compatibility")
+except RuntimeError as e:
+    print(f"Multiprocessing: Could not set start method - {e}")
 
 def load_callbacks():
     callbacks = []
@@ -179,6 +187,13 @@ if __name__ == '__main__':
     # Training Info
     parser.add_argument('--dataset', default='protein_dataset', type=str)
     parser.add_argument('--data_path', default='dataset/protein_g/', type=str)
+    parser.add_argument('--pdb_path', default='dataset/rcsb/human/', type=str, help='Path to PDB files for on-the-fly processing')
+    parser.add_argument('--cache_path', default='dataset/protein_cache/', type=str, help='Path for persistent cache storage')
+    parser.add_argument('--enable_pdb_processing', action='store_true', default=True, help='Enable on-the-fly PDB processing')
+    parser.add_argument('--force_pdb_processing', action='store_true', help='Force PDB processing even if .pt files exist')
+    parser.add_argument('--skip_invalid_files', action='store_true', default=True, help='Skip files that fail to process')
+    parser.add_argument('--validate_on_init', action='store_true', help='Pre-validate PDB files during dataset initialization')
+    parser.add_argument('--esm_use_cpu', action='store_true', help='Force ESM-C to use CPU (avoids CUDA multiprocessing issues)')
     parser.add_argument('--complete_graph_percent', default=0, type=int, help='Percentage of complete graphs in the dataset') # Different from GearNet
     parser.add_argument('--test_percent', default=0.01, type=float, help='Percentage of data used for testing')
     parser.add_argument('--model_name', default='contrastive', type=str)
