@@ -18,7 +18,7 @@ import time
 class CacheManager:
     """Persistent cache manager for protein graph data with multiprocessing support."""
     
-    def __init__(self, cache_path: str, max_size: int = 1000):
+    def __init__(self, cache_path: str, max_size: int = 100000):
         """
         Initialize cache manager.
         
