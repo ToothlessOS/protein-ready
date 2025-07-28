@@ -19,6 +19,26 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from .graph_collate import graph_collate_fn
 
+
+def worker_init_fn(worker_id):
+    """Initialize DataLoader worker for CUDA compatibility."""
+    import torch
+    import os
+    import random
+    import numpy as np
+    
+    # Set random seeds for reproducibility
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    
+    # Clear CUDA cache for this worker
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    print(f"DataLoader worker {worker_id} initialized with seed {worker_seed}")
+
+
 class DInterface(pl.LightningDataModule):
 
     def __init__(self, num_workers=8,
@@ -52,13 +72,37 @@ class DInterface(pl.LightningDataModule):
     #     return DataLoader(self.trainset, batch_size=self.batch_size, num_workers=self.num_workers, sampler = sampler)
 
     def train_dataloader(self):
-        return DataLoader(self.trainset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True, collate_fn=graph_collate_fn)
+        return DataLoader(
+            self.trainset, 
+            batch_size=self.batch_size, 
+            num_workers=self.num_workers, 
+            shuffle=True, 
+            collate_fn=graph_collate_fn,
+            worker_init_fn=worker_init_fn,
+            persistent_workers=True if self.num_workers > 0 else False
+        )
 
     def val_dataloader(self):
-        return DataLoader(self.valset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, collate_fn=graph_collate_fn)
+        return DataLoader(
+            self.valset, 
+            batch_size=self.batch_size, 
+            num_workers=self.num_workers, 
+            shuffle=False, 
+            collate_fn=graph_collate_fn,
+            worker_init_fn=worker_init_fn,
+            persistent_workers=True if self.num_workers > 0 else False
+        )
 
     def test_dataloader(self):
-        return DataLoader(self.testset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, collate_fn=graph_collate_fn)
+        return DataLoader(
+            self.testset, 
+            batch_size=self.batch_size, 
+            num_workers=self.num_workers, 
+            shuffle=False, 
+            collate_fn=graph_collate_fn,
+            worker_init_fn=worker_init_fn,
+            persistent_workers=True if self.num_workers > 0 else False
+        )
 
     def load_data_module(self):
         name = self.dataset
